@@ -4,43 +4,79 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
+import { newIdempotencyKey } from '@/api/client';
+import { catalogApi, requestsApi } from '@/api/endpoints';
+import type { Urgency } from '@/api/types';
 import { EmergencyBanner } from '@/components/emergency-banner';
+import { ErrorNotice, LoadingView } from '@/components/error-notice';
 import { Screen } from '@/components/screen';
 import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
-import { IconTile } from '@/components/ui/icon-tile';
 import { ScreenHeader } from '@/components/ui/screen-header';
+import { categoryStyles, isCategoryCode, serviceIcon, serviceName } from '@/constants/catalog';
+import { DEFAULT_PLACE, PLACES } from '@/constants/places';
 import { Colors, Radius, Spacing, Typography } from '@/constants/theme';
+import { useAction } from '@/hooks/use-action';
+import { useApiQuery } from '@/hooks/use-api-query';
 import { useI18n } from '@/i18n/i18n-context';
-import { categoryStyles, mockClient, mockRequest, type ServiceCode } from '@/mocks/client-flow';
 import type { CategoryCode } from '@/types/service-request';
 
-type Urgency = 'asap' | 'today';
-
 export default function NewRequest() {
-  const { t, rtl } = useI18n();
-  const params = useLocalSearchParams<{ category?: CategoryCode; service?: ServiceCode }>();
-  const category: CategoryCode = params.category ?? 'home';
-  const service: ServiceCode | undefined = params.service ?? (category === 'home' ? 'plumbing' : undefined);
+  const { t, language } = useI18n();
+  const params = useLocalSearchParams<{ category?: string; service?: string }>();
+  const category: CategoryCode = params.category && isCategoryCode(params.category) ? params.category : 'home';
   const isHealth = category === 'health';
+  const services = useApiQuery('services', catalogApi.services);
+  const inCategory = services.data?.filter((s) => s.category.code === category) ?? [];
 
   // Données de santé : on ne pré-remplit rien et on limite la saisie au nécessaire (§10.5).
-  const [description, setDescription] = useState(isHealth ? '' : mockRequest.description);
+  const [serviceCode, setServiceCode] = useState<string | undefined>(params.service);
+  const [description, setDescription] = useState('');
+  const [placeCode, setPlaceCode] = useState(DEFAULT_PLACE.code);
+  const [addressLine, setAddressLine] = useState('');
+  const [landmark, setLandmark] = useState('');
   const [urgency, setUrgency] = useState<Urgency>('asap');
-  const [hasPhoto, setHasPhoto] = useState(!isHealth);
-  const chevron = rtl ? 'chevron-back' : 'chevron-forward';
+  // Une clé par demande en cours de saisie : un nouvel essai après une coupure réseau ne crée pas de doublon (§8.6).
+  const [idempotencyKey] = useState(newIdempotencyKey);
+  const { run, pending, error } = useAction();
   const c = categoryStyles[category];
+
+  const selected = inCategory.find((s) => s.code === serviceCode) ?? (inCategory.length === 1 ? inCategory[0] : undefined);
+  const place = PLACES.find((p) => p.code === placeCode) ?? DEFAULT_PLACE;
+  const placeName = language === 'ar' ? place.ar : place.fr;
+  const valid = selected !== undefined && description.trim().length > 0 && addressLine.trim().length > 0;
+
+  const submit = async () => {
+    if (!selected) {
+      return;
+    }
+    const created = await run(() =>
+      requestsApi.create(
+        {
+          serviceCode: selected.code,
+          urgency,
+          description: description.trim(),
+          addressLine: `${addressLine.trim()}, ${place.fr}`,
+          landmark: landmark.trim() || null,
+          latitude: place.latitude,
+          longitude: place.longitude,
+        },
+        idempotencyKey,
+      ),
+    );
+    if (created) {
+      router.replace({ pathname: '/client/search', params: { id: created.id } });
+    }
+  };
 
   return (
     <Screen
       edges={['top', 'left', 'right', 'bottom']}
-      header={<ScreenHeader title={t.newRequest.title} right={<Text style={styles.step}>{t.newRequest.step}</Text>} />}
+      header={<ScreenHeader title={t.newRequest.title} />}
       footer={
-        <Button
-          label={t.newRequest.submit}
-          disabled={description.trim().length === 0}
-          onPress={() => router.push('/client/search')}
-        />
+        <>
+          <ErrorNotice error={error} />
+          <Button label={t.newRequest.submit} disabled={!valid} loading={pending} onPress={submit} />
+        </>
       }>
       {isHealth ? (
         <>
@@ -49,13 +85,27 @@ export default function NewRequest() {
         </>
       ) : null}
 
-      <Card tone="soft">
-        <View style={styles.row}>
-          <IconTile icon={service === 'plumbing' ? 'faucet' : c.icon} color={c.color} background={c.background} />
-          <Text style={[Typography.heading, styles.grow]}>{service ? t.services[service] : t.categories[category]}</Text>
-          <Ionicons name={chevron} size={20} color={Colors.textSecondary} />
+      <View style={styles.block}>
+        <Text style={Typography.heading}>{t.categories[category]}</Text>
+        <ErrorNotice error={services.error} onRetry={services.refresh} />
+        {services.loading ? <LoadingView /> : null}
+        <View style={styles.chips}>
+          {inCategory.map((s) => {
+            const active = s.code === selected?.code;
+            return (
+              <Pressable
+                key={s.code}
+                accessibilityRole="radio"
+                accessibilityState={{ checked: active }}
+                onPress={() => setServiceCode(s.code)}
+                style={[styles.serviceChip, active && styles.chipActive]}>
+                <MaterialCommunityIcons name={serviceIcon(s.code, category)} size={20} color={active ? c.color : Colors.text} />
+                <Text style={[styles.chipText, active && styles.chipTextActive]}>{serviceName(s, language)}</Text>
+              </Pressable>
+            );
+          })}
         </View>
-      </Card>
+      </View>
 
       <View style={styles.block}>
         <Text style={Typography.heading}>{t.newRequest.describe}</Text>
@@ -65,45 +115,49 @@ export default function NewRequest() {
           placeholder={t.newRequest.describePlaceholder}
           placeholderTextColor={Colors.textMuted}
           multiline
-          maxLength={500}
+          maxLength={2000}
           style={styles.textarea}
         />
       </View>
 
-      {!isHealth ? (
-        <View style={styles.block}>
-          <Text style={Typography.bodyStrong}>
-            {t.newRequest.photos} <Text style={styles.optional}>· {t.newRequest.optional}</Text>
-          </Text>
-          <View style={styles.photos}>
-            {hasPhoto ? (
-              <View style={styles.photo}>
-                <MaterialCommunityIcons name="pipe-leak" size={44} color="#C9D6DD" />
-                <Pressable accessibilityRole="button" style={styles.photoRemove} onPress={() => setHasPhoto(false)}>
-                  <Ionicons name="close" size={14} color={Colors.text} />
-                </Pressable>
-              </View>
-            ) : null}
-            <Pressable accessibilityRole="button" style={styles.addPhoto} onPress={() => setHasPhoto(true)}>
-              <Ionicons name="add" size={28} color={Colors.textSecondary} />
-              <Text style={styles.addPhotoText}>{t.newRequest.addPhoto}</Text>
-            </Pressable>
-          </View>
-        </View>
-      ) : null}
-
       <View style={styles.block}>
         <Text style={Typography.bodyStrong}>{t.newRequest.address}</Text>
-        <Card>
-          <View style={styles.row}>
-            <Ionicons name="location" size={26} color={Colors.primary} />
-            <View style={styles.grow}>
-              <Text style={Typography.bodyStrong}>{mockClient.district}</Text>
-              <Text style={Typography.caption}>{t.newRequest.chooseAddress}</Text>
-            </View>
-            <Ionicons name={chevron} size={20} color={Colors.textSecondary} />
-          </View>
-        </Card>
+        <View style={styles.chips}>
+          {PLACES.map((p) => {
+            const active = p.code === place.code;
+            return (
+              <Pressable
+                key={p.code}
+                accessibilityRole="radio"
+                accessibilityState={{ checked: active }}
+                onPress={() => setPlaceCode(p.code)}
+                style={[styles.placeChip, active && styles.chipActive]}>
+                <Text style={[styles.chipText, active && styles.chipTextActive]}>{language === 'ar' ? p.ar : p.fr}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+        <View style={styles.inputRow}>
+          <Ionicons name="location" size={22} color={Colors.primary} />
+          <TextInput
+            value={addressLine}
+            onChangeText={setAddressLine}
+            placeholder={t.newRequest.addressPlaceholder}
+            placeholderTextColor={Colors.textMuted}
+            maxLength={200}
+            style={styles.input}
+          />
+          <Text style={Typography.caption}>{placeName}</Text>
+        </View>
+        <TextInput
+          value={landmark}
+          onChangeText={setLandmark}
+          placeholder={t.newRequest.landmarkPlaceholder}
+          placeholderTextColor={Colors.textMuted}
+          maxLength={255}
+          style={styles.field}
+        />
+        <Text style={Typography.small}>{t.newRequest.addressHint}</Text>
       </View>
 
       <View style={styles.block}>
@@ -151,10 +205,30 @@ function UrgencyOption({
 }
 
 const styles = StyleSheet.create({
-  step: { fontSize: 13, color: Colors.textSecondary },
   row: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm + 4 },
   grow: { flex: 1 },
   block: { gap: Spacing.sm },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.sm },
+  serviceChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderWidth: 1.5,
+    borderColor: Colors.border,
+    borderRadius: Radius.md,
+    paddingHorizontal: Spacing.sm + 4,
+    paddingVertical: Spacing.sm,
+  },
+  placeChip: {
+    borderWidth: 1.5,
+    borderColor: Colors.border,
+    borderRadius: Radius.pill,
+    paddingHorizontal: Spacing.sm + 4,
+    paddingVertical: 6,
+  },
+  chipActive: { borderColor: Colors.primary, backgroundColor: Colors.primarySoft },
+  chipText: { fontSize: 14, fontWeight: '600', color: Colors.text },
+  chipTextActive: { color: Colors.primaryDark },
   textarea: {
     minHeight: 96,
     borderWidth: 1,
@@ -165,39 +239,25 @@ const styles = StyleSheet.create({
     color: Colors.text,
     textAlignVertical: 'top',
   },
-  optional: { fontWeight: '400', color: Colors.textSecondary },
-  photos: { flexDirection: 'row', gap: Spacing.sm + 4 },
-  photo: {
-    width: 104,
-    height: 104,
-    borderRadius: Radius.md,
-    backgroundColor: '#3E4A52',
+  inputRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-  },
-  photoRemove: {
-    position: 'absolute',
-    top: 6,
-    right: 6,
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: Colors.background,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  addPhoto: {
-    width: 104,
-    height: 104,
-    borderRadius: Radius.md,
-    borderWidth: 1.5,
-    borderStyle: 'dashed',
+    gap: Spacing.sm,
+    borderWidth: 1,
     borderColor: Colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 2,
+    borderRadius: Radius.md,
+    paddingHorizontal: Spacing.md,
   },
-  addPhotoText: { fontSize: 12, color: Colors.textSecondary, textAlign: 'center' },
+  input: { flex: 1, fontSize: 16, paddingVertical: Spacing.md, color: Colors.text },
+  field: {
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: Radius.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.md - 2,
+    fontSize: 15,
+    color: Colors.text,
+  },
   option: {
     flex: 1,
     flexDirection: 'row',

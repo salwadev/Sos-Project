@@ -19,6 +19,12 @@ api_platform:
         cache_headers:
             vary: ['Content-Type', 'Authorization', 'Origin']
     exception_to_status:
+        # Valeurs par défaut d'API Platform, à répéter : déclarer cette clé remplace la liste au lieu de la compléter.
+        # Sans elles, un corps JSON illisible (ex. non UTF-8) remonte en 500 au lieu de 400.
+        Symfony\Component\Serializer\Exception\ExceptionInterface: 400
+        ApiPlatform\Metadata\Exception\InvalidArgumentException: 400
+        Doctrine\ORM\OptimisticLockException: 409
+        Doctrine\DBAL\Exception\UniqueConstraintViolationException: 422
         # Transition refusée par la machine à états des demandes (§8.4).
         App\Domain\Request\InvalidRequestTransition: 409
         # Offre déjà réservée, expirée ou délai dépassé (§16.3, §16.5).

@@ -1,11 +1,15 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
-import { StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
+import { authApi, toE164 } from '@/api/endpoints';
+import { useAuth, type Space } from '@/auth/auth-context';
+import { ErrorNotice } from '@/components/error-notice';
 import { Screen } from '@/components/screen';
 import { Button } from '@/components/ui/button';
 import { ScreenHeader } from '@/components/ui/screen-header';
 import { Colors, Radius, Spacing, Typography } from '@/constants/theme';
+import { useAction } from '@/hooks/use-action';
 import { useI18n, useLtrRow } from '@/i18n/i18n-context';
 import { formatPhone } from '@/utils/format';
 
@@ -14,18 +18,35 @@ const CODE_LENGTH = 6;
 export default function VerifyOtp() {
   const { t } = useI18n();
   const ltrRow = useLtrRow();
-  const { phone = '' } = useLocalSearchParams<{ phone?: string }>();
+  const { signIn } = useAuth();
+  const { phone = '', space = 'client' } = useLocalSearchParams<{ phone?: string; space?: Space }>();
   const [code, setCode] = useState('');
+  const [resent, setResent] = useState(false);
+  const { run, pending, error } = useAction();
 
-  const verify = () => {
-    // POST /api/auth/verify-otp puis stockage des jetons (token-storage). Démo : tout code à 6 chiffres passe.
-    router.replace('/client');
+  const verify = async () => {
+    // Jetons stockés dans le trousseau ; le compte client est créé au premier passage.
+    const session = await run(() => signIn(toE164(phone), code, space === 'pro' ? 'pro' : 'client'));
+    if (session) {
+      router.replace(session.space === 'pro' ? '/pro' : '/client');
+    } else {
+      setCode('');
+    }
+  };
+
+  const resend = async () => {
+    setResent(false);
+    const sent = await run(async () => {
+      await authApi.requestOtp(toE164(phone));
+      return true;
+    });
+    setResent(sent === true);
   };
 
   return (
     <Screen
       header={<ScreenHeader title={t.otp.title} onBack={() => router.back()} />}
-      footer={<Button label={t.otp.submit} disabled={code.length !== CODE_LENGTH} onPress={verify} />}>
+      footer={<Button label={t.otp.submit} disabled={code.length !== CODE_LENGTH} loading={pending} onPress={verify} />}>
       <Text style={Typography.body}>
         {t.otp.subtitle} <Text style={styles.phone}>+216 {formatPhone(phone)}</Text>
       </Text>
@@ -48,8 +69,12 @@ export default function VerifyOtp() {
         />
       </View>
 
-      <Text style={styles.resend}>{t.otp.resend}</Text>
-      <Text style={styles.hint}>{t.otp.demoHint}</Text>
+      <ErrorNotice error={error} />
+
+      <Pressable accessibilityRole="button" onPress={resend} disabled={pending} hitSlop={8}>
+        <Text style={styles.resend}>{resent ? t.otp.resent : t.otp.resend}</Text>
+      </Pressable>
+      {__DEV__ ? <Text style={styles.hint}>{t.otp.devHint}</Text> : null}
     </Screen>
   );
 }

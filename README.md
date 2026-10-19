@@ -35,6 +35,108 @@ Base disponible sur `localhost:5433` (db `sos`, user `sos`). URL Doctrine pour `
 DATABASE_URL="postgresql://sos:sos_dev_password@127.0.0.1:5433/sos?serverVersion=16&charset=utf8"
 ```
 
+## Tester à la main
+
+Parcours complet en local, sans SQL : comptes de démonstration, back-office admin, puis une demande client
+jusqu'aux professionnels. Prérequis : base démarrée et backend installé (voir [Backend › Installation](#installation-une-fois)).
+
+**1. Créer les comptes de démonstration** (idempotent, refusé en `prod`) :
+
+```bash
+cd backend
+php bin/console app:seed-demo
+```
+
+La commande charge aussi le catalogue (`app:seed-catalog`) et affiche :
+
+| Compte | Téléphone | Détail |
+|---|---|---|
+| Admin | `+21650000001` | `ROLE_ADMIN` (donc aussi support) |
+| Client | `+21650000002` | « Amira » |
+| Professionnel | `+21650000011` | Sami B. — plomberie, pièce d'identité approuvée |
+| Professionnel | `+21650000012` | Hela K. — plomberie et électricité, identité + qualification approuvées |
+| Professionnel | `+21650000013` | Marsa Dépannage SARL — plomberie, identité + registre du commerce approuvés |
+
+Les trois professionnels sont vérifiés, couvrent La Marsa et sont disponibles 12 h : relancer la commande remet
+cet état (re-vérifie, prolonge la disponibilité) sans créer de doublon. Les numéros sont fictifs ; en `dev` aucun SMS
+ne part.
+
+**2. Lancer l'API, le worker et le back-office** (trois terminaux, depuis la racine) :
+
+```bash
+symfony server:start --no-tls --allow-http --port=8000 --dir=backend
+```
+
+```bash
+php backend/bin/console messenger:consume async scheduler_matching -vv
+```
+
+(Sans worker, `php backend/bin/console app:matching:dispatch` fait un passage à la main.)
+
+```bash
+npm --prefix backoffice run dev
+```
+
+(`npm install` dans `backoffice/` la première fois ; `backoffice/.env.example` donne `VITE_API_ENTRYPOINT`.)
+
+**3. Se connecter** : le code OTP à 6 chiffres est écrit dans `backend/var/sms_outbox.log` (dernière ligne du numéro),
+valable 5 min, 3 envois par numéro toutes les 10 min.
+
+```bash
+grep '+21650000001' backend/var/sms_outbox.log | tail -1
+```
+
+**4. Back-office** — http://localhost:5173, numéro `+21650000001`, « Recevoir un code », puis le code.
+
+- Seuls `ROLE_ADMIN` et `ROLE_SUPPORT` entrent ; un client reçoit « Accès réservé à l'administration et au support ».
+- Menu **Vérification des professionnels** (admin) : file filtrée par statut (défaut « En attente », filtre « Vérifié »
+  pour voir les trois comptes de démo). La fiche montre métiers, zones et justificatifs (bouton « Ouvrir », fichier
+  servi avec le jeton) ; le formulaire « Décision » statue sur les justificatifs et applique l'action
+  (approuver / rejeter / suspendre / réactiver) en un seul `PATCH /api/admin/professionals/{id}/verification`, motif obligatoire.
+- Le JWT (15 min) est renouvelé tout seul via `/api/auth/refresh` ; un 401 malgré tout ramène à l'écran de connexion.
+- Pour remplir la file « En attente » : se connecter par OTP avec un nouveau numéro (ex. `+21650000021`), puis
+  `POST /api/professional/profile` et `POST /api/professional/documents` (type `identity`), voir
+  [Inscription et vérification des professionnels](#inscription-et-vérification-des-professionnels-61-62-72-144-145).
+
+**5. Une demande de bout en bout** (bash + curl, API sur le port 8000) :
+
+```bash
+API=http://localhost:8000/api
+login() {  # login <téléphone> → affiche le JWT
+  curl -s -X POST $API/auth/request-otp -H 'Content-Type: application/json' -d "{\"phone\":\"$1\"}" > /dev/null
+  code=$(grep "$1" backend/var/sms_outbox.log | tail -1 | grep -oE 'est [0-9]{6}' | grep -oE '[0-9]{6}')
+  curl -s -X POST $API/auth/verify-otp -H 'Content-Type: application/json' -d "{\"phone\":\"$1\",\"code\":\"$code\"}" | sed -E 's/.*"token":"([^"]+)".*/\1/'
+}
+CLIENT=$(login +21650000002)
+curl -s -X POST $API/requests -H "Authorization: Bearer $CLIENT" -H 'Content-Type: application/json' -H 'Accept: application/json' \
+  -d '{"serviceCode":"plumbing","urgency":"asap","description":"Fuite sous evier de cuisine","addressLine":"Rue des Orangers, La Marsa","latitude":36.88,"longitude":10.33}'
+```
+
+Le worker lance la première vague : les trois plombiers sont sollicités (`electricity` ne sollicite que Hela K.).
+Un professionnel suspendu puis réactivé dans le back-office a perdu sa disponibilité (la suspension la coupe) :
+relancer `app:seed-demo` ou faire `PATCH /api/professional/availability`. Garder ces commandes dans le même terminal
+(`$CLIENT` resservira) : au-delà de 3 codes en 10 min pour un numéro, `login` ne renvoie plus de jeton.
+Côté professionnel puis client :
+
+```bash
+PRO=$(login +21650000012)
+curl -s $API/professional/requests -H "Authorization: Bearer $PRO" -H 'Accept: application/json'   # → id de l'offre
+curl -s -X POST $API/offers/<offre>/accept -H "Authorization: Bearer $PRO" -H 'Content-Type: application/json' -d '{}'
+curl -s -X POST $API/offers/<offre>/accept -H "Authorization: Bearer $CLIENT" -H 'Content-Type: application/json' -d '{}'   # confirmation → interventionId
+```
+
+La suite (étapes, devis, clôture, avis) est décrite dans [Intervention, devis et clôture](#intervention-devis-et-clôture-55-57-66-9-161-164).
+
+**Amorcer un vrai admin** (n'importe quel environnement, journalisé `user.role_granted` dans l'audit) :
+
+```bash
+php backend/bin/console app:user:grant-role +216XXXXXXXX ROLE_ADMIN
+```
+
+Le compte doit s'être connecté une fois par OTP, sinon ajouter `--create`. Rôles possibles : `ROLE_ADMIN`,
+`ROLE_SUPPORT`, `ROLE_CLIENT` ; le rôle professionnel passe par `POST /api/professional/profile` puis la vérification.
+Le rôle s'applique dès la requête suivante (rôles relus en base) ; se reconnecter pour que le back-office le voie.
+
 ## Principes d'architecture (rappel du cahier des charges)
 
 - **Le backend est l'autorité** (§4.5) : identité, rôle, propriété de la ressource et état métier sont vérifiés à chaque appel.
@@ -249,6 +351,9 @@ verrou, puis le relâche : un seul obtient la réservation, l'autre reçoit le 4
 `ProfessionalOnboardingApiTest` et `ProfessionalVerificationApiTest` couvrent l'inscription, les dépôts (type réel,
 taille, expiration, stockage privé), les autorisations §16.6, les décisions admin journalisées et le parcours
 inscription → vérification → sollicitation par le matching.
+`SeedDemoCommandTest` et `GrantRoleCommandTest` vérifient les comptes de démonstration (connexion OTP de l'admin,
+IRI JSON-LD de la file admin, sollicitation des trois plombiers, idempotence, refus en `prod`) et l'amorçage d'un admin
+journalisé.
 
 Deux suites lancées en même temps sur la même base se vident mutuellement les tables. Pour une exécution isolée
 (autre session, autre terminal), donner une base, un cache et un répertoire de justificatifs à part :

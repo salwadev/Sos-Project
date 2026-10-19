@@ -43,6 +43,8 @@ use App\State\Professional\UpsertProfessionalProfileProcessor;
     operations: [
         new GetCollection(
             uriTemplate: '/admin/professionals',
+            // Sans cela, les membres prendraient l'IRI du premier Get de la classe (/professional/profile), le même pour tous.
+            itemUriTemplate: '/admin/professionals/{id}',
             paginationEnabled: false,
             description: 'Profils à traiter, plus anciens d\'abord. Filtre « verificationStatus » (défaut : pending), « page » (30 par page).',
         ),

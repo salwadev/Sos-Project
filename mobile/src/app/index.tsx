@@ -1,30 +1,51 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { router } from 'expo-router';
+import { Redirect, router, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
+import { authApi, toE164 } from '@/api/endpoints';
+import { useAuth, type Space } from '@/auth/auth-context';
 import { BrandLogo } from '@/components/brand-logo';
+import { ErrorNotice } from '@/components/error-notice';
 import { TunisiaFlag } from '@/components/tunisia-flag';
 import { LanguageSwitch } from '@/components/language-switch';
 import { Screen } from '@/components/screen';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { WelcomeIllustration } from '@/components/welcome-illustration';
 import { Colors, Radius, Spacing, Typography } from '@/constants/theme';
+import { useAction } from '@/hooks/use-action';
 import { useI18n, useLtrRow } from '@/i18n/i18n-context';
 import { formatPhone } from '@/utils/format';
 
 const PHONE_DIGITS = 8;
 
-
 export default function Welcome() {
   const { t } = useI18n();
   const ltrRow = useLtrRow();
+  const auth = useAuth();
+  const params = useLocalSearchParams<{ space?: Space }>();
+  const [space, setSpace] = useState<Space>(params.space === 'pro' ? 'pro' : 'client');
   const [digits, setDigits] = useState('');
+  const { run, pending, error } = useAction();
   const valid = digits.length === PHONE_DIGITS;
 
-  const submit = () => {
-    // POST /api/auth/request-otp — réponse identique que le numéro soit inscrit ou non (§5.1).
-    router.push({ pathname: '/verify-otp', params: { phone: digits } });
+  if (auth.status === 'loading') {
+    return null;
+  }
+  if (auth.status === 'signedIn') {
+    return <Redirect href={auth.session.space === 'pro' ? '/pro' : '/client'} />;
+  }
+
+  const submit = async () => {
+    // Réponse 202 identique que le numéro soit inscrit ou non (§5.1).
+    const sent = await run(async () => {
+      await authApi.requestOtp(toE164(digits));
+      return true;
+    });
+    if (sent) {
+      router.push({ pathname: '/verify-otp', params: { phone: digits, space } });
+    }
   };
 
   return (
@@ -61,7 +82,9 @@ export default function Welcome() {
         </View>
       </View>
 
-      <Button label={t.welcome.submit} disabled={!valid} onPress={submit} />
+      {space === 'pro' ? <Badge label={t.welcome.proSpace} tone="primary" /> : null}
+      <ErrorNotice error={error} />
+      <Button label={t.welcome.submit} disabled={!valid} loading={pending} onPress={submit} />
 
       <Text style={styles.terms}>
         {t.welcome.termsPrefix}
@@ -76,8 +99,11 @@ export default function Welcome() {
         </View>
       </View>
 
-      <Pressable accessibilityRole="link" onPress={() => router.push('/pro')} style={styles.proLink}>
-        <Text style={styles.proLinkText}>{t.welcome.proLink}</Text>
+      <Pressable
+        accessibilityRole="link"
+        onPress={() => setSpace(space === 'pro' ? 'client' : 'pro')}
+        style={styles.proLink}>
+        <Text style={styles.proLinkText}>{space === 'pro' ? t.welcome.clientLink : t.welcome.proLink}</Text>
       </Pressable>
     </Screen>
   );

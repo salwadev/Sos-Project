@@ -96,6 +96,26 @@ final class ServiceRequestApiTest extends ApiTestCase
         self::assertSame(422, $this->httpStatus());
     }
 
+    public function testABodyThatIsNotValidUtf8IsABadRequest(): void
+    {
+        [, $token] = $this->client();
+        // Apostrophe Windows-1252 (0x92) envoyée par un terminal qui n'est pas en UTF-8.
+        $body = str_replace('’', "\x92", json_encode(self::PAYLOAD, \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR));
+
+        foreach (['application/json', 'application/ld+json'] as $contentType) {
+            $this->client->request('POST', '/api/requests', server: [
+                'CONTENT_TYPE' => $contentType,
+                'HTTP_ACCEPT' => 'application/json',
+                'HTTP_AUTHORIZATION' => 'Bearer '.$token,
+            ], content: $body);
+
+            $problem = json_decode($this->client->getResponse()->getContent(), true, flags: \JSON_THROW_ON_ERROR);
+            self::assertSame(400, $this->httpStatus(), $contentType);
+            self::assertStringContainsString('UTF-8', $problem['detail'], $contentType);
+        }
+        self::assertCount(0, $this->em()->getRepository(ServiceRequest::class)->findAll());
+    }
+
     public function testOnlyClientsCanCreateRequests(): void
     {
         $pro = Factory::user($this->em(), UserRole::Professional);

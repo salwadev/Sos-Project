@@ -7,6 +7,7 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import { Platform, StyleSheet, View } from 'react-native';
 
+import { AuthProvider } from '@/auth/auth-context';
 import { Colors } from '@/constants/theme';
 import { I18nProvider, useI18n } from '@/i18n/i18n-context';
 
@@ -41,8 +42,10 @@ export default function RootLayout() {
 
   return (
     <I18nProvider>
-      <StatusBar style="dark" />
-      <RootStack />
+      <AuthProvider>
+        <StatusBar style="dark" />
+        <RootStack />
+      </AuthProvider>
     </I18nProvider>
   );
 }
