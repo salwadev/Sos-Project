@@ -9,7 +9,6 @@ use App\Entity\ProfessionalProfile;
 use App\Entity\User;
 use App\Enum\DocumentStatus;
 use App\Enum\DocumentType;
-use Doctrine\DBAL\LockMode;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
@@ -36,7 +35,10 @@ final class ProfessionalVerifier
         $connection = $this->em->getConnection();
         $connection->beginTransaction();
         try {
-            $this->em->refresh($profile, LockMode::PESSIMISTIC_WRITE);
+            // Verrou posé en SQL : le SELECT de l'ORM joint la disponibilité (one-to-one inverse) en LEFT JOIN,
+            // incompatible avec FOR UPDATE sous PostgreSQL. On relit ensuite l'état une fois le verrou obtenu.
+            $connection->executeQuery('SELECT id FROM professional_profile WHERE id = ? FOR UPDATE', [$profile->getId()->toRfc4122()]);
+            $this->em->refresh($profile);
             $now = Clock::now();
             $from = $profile->getVerificationStatus();
             if (null !== $action && !\in_array($from, $action->allowedFrom(), true)) {

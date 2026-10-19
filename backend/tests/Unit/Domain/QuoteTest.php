@@ -62,4 +62,33 @@ final class QuoteTest extends TestCase
         $this->expectException(\InvalidArgumentException::class);
         new Quote(Factory::intervention(), 1, [['label' => 'Remise', 'amountMillimes' => -5_000]], $this->now);
     }
+
+    public function testTheLatestAcceptedVersionPrevailsAndARefusalKeepsThePreviousOne(): void
+    {
+        $intervention = Factory::intervention();
+        $v1 = new Quote($intervention, 1, [['label' => 'Diagnostic', 'amountMillimes' => 20_000]], $this->now);
+        $v1->accept($this->now);
+        $v2 = new Quote($intervention, 2, [['label' => 'Pièce', 'amountMillimes' => 60_000]], $this->now, 'Pièce cassée.');
+
+        self::assertSame($v1, $intervention->getAcceptedQuote(), 'Une version proposée n\'est pas acceptée (§16.4).');
+        self::assertSame($v2, $intervention->getPendingQuote());
+
+        $v2->reject($this->now);
+        self::assertSame($v1, $intervention->getAcceptedQuote());
+        self::assertNull($intervention->getPendingQuote());
+
+        $v3 = new Quote($intervention, 3, [['label' => 'Pièce', 'amountMillimes' => 45_000]], $this->now, 'Pièce d\'occasion.');
+        $v3->accept($this->now);
+        self::assertSame($v3, $intervention->getAcceptedQuote());
+        self::assertCount(3, $intervention->getQuotes(), 'Toutes les versions sont conservées.');
+    }
+
+    public function testOnlyAPendingVersionCanBeSuperseded(): void
+    {
+        $quote = new Quote(Factory::intervention(), 1, [['label' => 'Diagnostic', 'amountMillimes' => 20_000]], $this->now);
+        $quote->accept($this->now);
+
+        $this->expectException(\DomainException::class);
+        $quote->supersede();
+    }
 }

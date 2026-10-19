@@ -156,6 +156,70 @@ la vague suivante part, et si plus aucun professionnel n'est éligible la demand
 dépassé ou une réservation échue donnent aussi un 409 explicite (§16.5). Réservation, confirmation et refus client
 sont écrits dans le journal d'audit.
 
+### Intervention, devis et clôture (§5.5–5.7, §6.6, §9, §16.1, §16.4)
+
+Une fois l'offre confirmée par le client (demande `ACCEPTED`), l'`Intervention` suit son cours via `src/Intervention/`.
+Comme pour les offres, chaque décision passe par `RequestLock` puis revérifie l'état relu en base ; un état qui ne
+permet pas l'action renvoie un 409 avec un `detail` explicite (`InterventionConflict`). Les droits sont portés par
+`InterventionVoter` : `WORK` = professionnel assigné, `CLIENT` = client propriétaire de la demande, `VIEW` = les deux,
+l'administration, et le support sauf demandes santé.
+
+| Endpoint | Accès |
+|---|---|
+| `GET /api/interventions`, `GET /api/interventions/{id}` | Client propriétaire, professionnel assigné (+ admin, support hors santé). La vue (`InterventionView`) révèle au professionnel l'**adresse exacte** (ligne, repère, latitude/longitude) seulement après la confirmation du client et tant que la demande est `ACCEPTED` ou `IN_PROGRESS` (§6.4). La commission n'est montrée qu'au professionnel et à l'admin. |
+| `POST /api/interventions/{id}/status` `{status, estimatedArrivalMinutes?}` | Professionnel assigné : `on_the_way` → `on_site` → `working` → `completion_declared`, uniquement vers l'avant (les deux premières étapes peuvent être omises). `estimatedArrivalMinutes` seulement avec `on_the_way` : `estimatedArrivalAt` est une estimation (§5.6). `working` exige un devis accepté et aucun en attente, et applique `start_work` (ACCEPTED → IN_PROGRESS) ; `completion_declared` n'est possible qu'après `working`, sans devis en attente. |
+| `POST /api/interventions/{id}/quotes` `{lines: [{label, amountMillimes}], explanation?}` | Professionnel assigné, jusqu'à `working` inclus : nouvelle version (201). `explanation` obligatoire dès la version 2 (§6.6) ; une version encore en attente est marquée `superseded`. |
+| `POST /api/quotes/{id}/accept`, `POST /api/quotes/{id}/reject` | Client propriétaire seulement : aucune modification de prix n'est acceptée sans cette action (§16.4). Après un refus, la dernière version acceptée reste celle qui fait foi ; toutes les versions sont conservées avec `proposedAt`/`decidedAt`. |
+| `POST /api/interventions/{id}/confirm-completion` | Client propriétaire, après `completion_declared` : `complete` (IN_PROGRESS → COMPLETED) et calcul de la `Commission`, **une seule fois** (vérification sous verrou + contrainte unique ; une seconde confirmation renvoie 409). |
+| `POST /api/interventions/{id}/dispute` `{reason}` | Client propriétaire, pendant les travaux ou après la clôture : `dispute` (→ DISPUTED). Trace horodatée : transition avec motif dans `service_request_transition` et `Complaint` ouverte pour le support (§5.7, §7.4). L'intervention est alors gelée ; une commission déjà calculée est conservée en attendant la résolution. |
+| `POST /api/interventions/{id}/reviews` `{rating 1–5, comment?}` | Client propriétaire, intervention terminée et confirmée (demande `COMPLETED`, sans contestation) ; un seul avis par intervention (201, puis 409). Met à jour la note moyenne du professionnel. |
+
+Toutes ces opérations renvoient l'`InterventionView` à jour (statuts et horodatages UTC, devis, `acceptedQuote`,
+`pendingQuote`, commission, avis). Si le client annule une demande `ACCEPTED`, l'intervention passe `cancelled`.
+
+**Commission** (§9.4, `CommissionPolicy`) : assiette = total du devis accepté qui fait foi (frais de déplacement compris
+s'ils y figurent en ligne) ; taux en points de base `app.commission.default_rate_basis_points` (1000 = 10 %),
+surchargeable par code de catégorie avec `app.commission.rate_basis_points_by_category` ; arrondi au millime. Base et
+taux restent à valider contractuellement.
+
+**Audit** : `intervention.status_changed`, `quote.proposed`, `quote.accepted`, `quote.rejected`,
+`intervention.completed` (assiette, taux, montant), `intervention.disputed` (identifiant de la réclamation, sans le
+motif), `review.published`.
+
+### Inscription et vérification des professionnels (§6.1, §6.2, §7.2, §14.4, §14.5)
+
+Tout compte connecté peut devenir professionnel : `POST /api/professional/profile` crée le profil, ajoute
+`ROLE_PROFESSIONAL` (les rôles se cumulent, il reste client) et laisse le profil `pending`. Le matching l'ignore tant
+que l'administration ne l'a pas approuvé (`ProfessionalEligibility` : « profil non vérifié »).
+
+| Endpoint | Accès |
+|---|---|
+| `POST /api/professional/profile` `{displayName, legalStatus, services: [{serviceCode, travelFeeMillimes, diagnosticFeeMillimes?}], serviceAreaCodes, baseLatitude, baseLongitude}` | Tout compte connecté. Crée ou remplace le profil (200 dans les deux cas). Métiers et zones absents de la requête sont retirés. Une zone pas encore ouverte peut être couverte. |
+| `GET /api/professional/profile` | Professionnel : son profil, ses métiers, zones et justificatifs (métadonnées). |
+| `POST /api/professional/documents` (`multipart/form-data` : `file`, `type`, `expiresAt?`) | Professionnel. `type` ∈ `identity`, `qualification`, `company_registration`, `insurance`, `other`. PDF, JPEG ou PNG (type lu dans le contenu via `fileinfo`), 10 Mio au plus, pas déjà expiré. 201, statut `pending`. |
+| `GET /api/professional/documents/{id}/file` | Le professionnel propriétaire et l'admin seulement : ni un autre professionnel, ni le support (§16.6, §4.4). Pièce jointe, `Cache-Control: no-store` ; les consultations admin sont journalisées. |
+| `GET /api/admin/professionals?verificationStatus=pending&page=1` | Admin. File de vérification, plus anciens d'abord, 30 par page ; inclut le téléphone. |
+| `GET /api/admin/professionals/{id}` | Admin. |
+| `PATCH /api/admin/professionals/{id}/verification` `{action?, reason, documents?: [{id, status, rejectionReason?, expiresAt?}]}` | Admin, `application/merge-patch+json`. Voir ci-dessous. |
+
+- **Décisions** (`App\Domain\Professional\ProfessionalVerifier`) : `approve` (pending ou rejected → verified),
+  `reject` (pending → rejected), `suspend` (verified → suspended, coupe aussi la disponibilité), `reactivate`
+  (suspended → verified). Autre cas : 409. `reason` est toujours obligatoire (conservé dans `verificationNote`).
+- **Justificatifs** : `approved` ou `rejected` (motif de rejet obligatoire), l'admin peut fixer `expiresAt`. Ils sont
+  traités avant l'action, ce qui permet de valider la pièce d'identité et d'approuver le profil d'un seul appel.
+- **Conditions** pour `approve`/`reactivate` : pièce d'identité approuvée et valide, plus l'extrait du registre pour
+  une entreprise. Les qualifications restent exigées service par service au matching (`Service::requiresQualification`).
+- Tout se fait sous verrou de la ligne `professional_profile` et dans une seule transaction avec le journal d'audit
+  (`professional.document_reviewed`, `professional.verification_changed` avec action, avant/après et motif) :
+  une décision refusée n'écrit rien. L'inscription, les mises à jour et les dépôts sont aussi journalisés.
+- **Côté professionnel** : modifier un profil rejeté le renvoie en vérification ; sur un profil vérifié, changer le nom
+  affiché ou le statut juridique le renvoie aussi en `pending` (métiers, zones et tarifs non) ; un profil suspendu ne
+  peut pas être modifié (409).
+- **Stockage** (`App\Storage\DocumentStorage`) : `LocalDocumentStorage` écrit dans `backend/var/private/<env>/documents`
+  (`app.documents.storage_dir`), hors de `public/`, sous une clé générée (jamais le nom d'origine), et n'est lu que par
+  le contrôleur ci-dessus. En production : brancher un stockage objet privé à liens signés courts (§12.6). Penser à
+  `upload_max_filesize`/`post_max_size` ≥ 10 Mio dans `php.ini`.
+
 ### Modèle de données (§13)
 
 Comptes : `User` (rôles multiples), `ClientProfile`, `ClientAddress`, `ProfessionalProfile`, `ProfessionalDocument`, `Availability`.
@@ -177,15 +241,26 @@ php bin/phpunit
 Tests unitaires (téléphone, devis, commission, offres), intégration (machine à états, journal d'audit,
 matching PostGIS : éligibilité §16.2, classement, vagues, expiration ; passage planifié et notifications) et
 fonctionnels HTTP (auth OTP, catalogue, demandes, diffusion après soumission, disponibilité, offres, autorisations,
-§16.5) sur la base `sos_test`. En test, le transport `async` est `in-memory://` : les messages restent en file et
+§16.5 ; intervention : parcours complet §16.1 de la soumission à la commission unique, adresse révélée après
+confirmation, étapes, devis versionnés §16.4, contestation, avis) sur la base `sos_test`. En test, le transport `async` est `in-memory://` : les messages restent en file et
 chaque test les traite quand il veut (`DrivesMatching::consumeAsyncMessages()`), ce qui garde le 201 en `SUBMITTED`.
 `OfferAcceptRaceTest` lance deux acceptations dans deux processus PHP (deux connexions PostgreSQL) bloqués sur le même
 verrou, puis le relâche : un seul obtient la réservation, l'autre reçoit le 409.
+`ProfessionalOnboardingApiTest` et `ProfessionalVerificationApiTest` couvrent l'inscription, les dépôts (type réel,
+taille, expiration, stockage privé), les autorisations §16.6, les décisions admin journalisées et le parcours
+inscription → vérification → sollicitation par le matching.
+
+Deux suites lancées en même temps sur la même base se vident mutuellement les tables. Pour une exécution isolée
+(autre session, autre terminal), donner une base, un cache et un répertoire de justificatifs à part :
+`TEST_TOKEN=_moi` (base `sos_test_moi`, à créer et migrer avec les commandes ci-dessus) et `APP_CACHE_DIR=/tmp/sos-cache`.
 
 ### Reste à faire côté backend
 
 Envoi des notifications push (les lignes `Notification` `pending` sont créées, aucun fournisseur n'est branché),
 élargissement progressif du
-rayon (§5.8), mise à jour du taux de réponse, équité de distribution (§8.2), parcours d'intervention et devis via l'API
-(`/api/interventions/{id}/status`, §6.6), profil et justificatifs professionnels (§14.4), endpoints admin (§14.5),
-stockage des justificatifs.
+rayon (§5.8), mise à jour du taux de réponse, équité de distribution (§8.2), autres endpoints admin (§14.5 :
+demandes, catégories, réclamations), stockage objet privé à liens signés et analyse antivirus des justificatifs
+(§12.6), justificatifs requis configurables par métier (§7.2), passage automatique des justificatifs échus en
+`expired` avec relance du professionnel. Côté intervention : notifications des changements
+d'étape et de devis, résolution des contestations par le support (`resolve_dispute`, ajustement de commission) et délai
+de contestation (§9.5), canal de contact contrôlé (§5.6), annulation par le professionnel après confirmation.
