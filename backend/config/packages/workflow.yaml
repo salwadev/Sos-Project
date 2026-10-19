@@ -1,0 +1,68 @@
+# Machine à états des demandes (cahier des charges §8.4).
+# Toute transition absente de cette liste est refusée côté serveur (409 via InvalidRequestTransition).
+framework:
+    workflows:
+        service_request:
+            type: state_machine
+            marking_store:
+                type: method
+                property: status
+            supports:
+                - App\Entity\ServiceRequest
+            initial_marking: DRAFT
+            places:
+                - DRAFT
+                - SUBMITTED
+                - SEARCHING
+                - OFFERED
+                - ACCEPTED
+                - IN_PROGRESS
+                - COMPLETED
+                - CANCELLED
+                - EXPIRED
+                - DISPUTED
+            transitions:
+                # Le client valide sa demande.
+                submit:
+                    from: DRAFT
+                    to: SUBMITTED
+                # Le moteur de matching commence à notifier des professionnels (§8.3).
+                start_search:
+                    from: SUBMITTED
+                    to: SEARCHING
+                # Un professionnel a accepté : la demande lui est réservée (§6.5).
+                receive_offer:
+                    from: SEARCHING
+                    to: OFFERED
+                # Offre refusée par le client ou réservation expirée : on relance la recherche (§5.8).
+                reopen_search:
+                    from: OFFERED
+                    to: SEARCHING
+                # Le client confirme le professionnel et les conditions tarifaires (§5.5).
+                accept_offer:
+                    from: OFFERED
+                    to: ACCEPTED
+                # Le professionnel commence l'intervention (§6.6).
+                start_work:
+                    from: ACCEPTED
+                    to: IN_PROGRESS
+                # Le client confirme la fin des travaux (§5.7).
+                complete:
+                    from: IN_PROGRESS
+                    to: COMPLETED
+                # Contestation par le client, avec trace horodatée (§5.7).
+                dispute:
+                    from: [IN_PROGRESS, COMPLETED]
+                    to: DISPUTED
+                # Résolution par le support / l'administration (§7.4).
+                resolve_dispute:
+                    from: DISPUTED
+                    to: COMPLETED
+                # Annulation avant le début des travaux (§8.5).
+                cancel:
+                    from: [DRAFT, SUBMITTED, SEARCHING, OFFERED, ACCEPTED]
+                    to: CANCELLED
+                # Aucune réponse dans les délais (§5.8) : jamais présentée comme prise en charge.
+                expire:
+                    from: [SUBMITTED, SEARCHING, OFFERED]
+                    to: EXPIRED

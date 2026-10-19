@@ -1,0 +1,61 @@
+# yaml-language-server: $schema=../vendor/symfony/dependency-injection/Loader/schema/services.schema.json
+
+# This file is the entry point to configure your own services.
+# Files in the packages/ subdirectory configure your dependencies.
+# See also https://symfony.com/doc/current/service_container/import.html
+
+# Put parameters here that don't need to change on each machine where the app is deployed
+# https://symfony.com/doc/current/best_practices.html#use-parameters-for-application-configuration
+parameters:
+    # Matching et diffusion (§5.8, §6.3, §8.3) — réglables par l'administration à terme (§7.5).
+    app.matching.wave_size: 3                 # professionnels sollicités par vague
+    app.matching.offer_response_seconds: 90   # délai de réponse d'un professionnel sollicité
+    app.matching.reservation_seconds: 300     # durée de réservation pendant laquelle le client confirme
+    app.matching.tick_seconds: 10             # passage périodique (MatchingSchedule) : vagues suivantes, expirations
+    app.availability.default_minutes: 240     # durée d'une disponibilité si le professionnel n'en précise pas
+    app.availability.max_minutes: 720         # au-delà, la disponibilité doit être reconfirmée
+    # Commission (§9.4) : taux en points de base (1000 = 10 %) sur le total du devis accepté, à confirmer
+    # contractuellement ; surcharge possible par code de catégorie, ex. { locksmith: 1200 }.
+    app.commission.default_rate_basis_points: 1000
+    app.commission.rate_basis_points_by_category: {}
+    # Justificatifs professionnels (§6.2, §12.6) : répertoire privé, jamais sous public/.
+    app.documents.storage_dir: '%kernel.project_dir%/var/private/%kernel.environment%/documents'
+
+services:
+    # default configuration for services in *this* file
+    _defaults:
+        autowire: true      # Automatically injects dependencies in your services.
+        autoconfigure: true # Automatically registers your services as commands, event subscribers, etc.
+
+    # makes classes in src/ available to be used as services
+    # this creates a service per class whose id is the fully-qualified class name
+    App\:
+        resource: '../src/'
+
+    # add more service definitions when explicit configuration is needed
+    # please note that last definitions always *replace* previous ones
+
+    # Aucun fournisseur SMS n'est encore choisi (§20) : l'envoi échoue explicitement hors dev/test.
+    App\Sms\SmsSender: '@App\Sms\UnconfiguredSmsSender'
+
+    # Disque local privé ; à remplacer par un stockage objet privé à liens signés en production (§12.6).
+    App\Storage\DocumentStorage: '@App\Storage\LocalDocumentStorage'
+
+when@dev:
+    services:
+        _defaults:
+            autowire: true
+            autoconfigure: true
+        App\Sms\SmsSender: '@App\Sms\DevOutboxSmsSender'
+
+when@test:
+    parameters:
+        # Un répertoire par base de test (TEST_TOKEN, cf. doctrine.yaml) : deux suites en parallèle ne se marchent pas dessus.
+        app.documents.storage_dir: '%kernel.project_dir%/var/private/test%env(default::TEST_TOKEN)%/documents'
+    services:
+        _defaults:
+            autowire: true
+            autoconfigure: true
+        App\Sms\InMemorySmsSender:
+            public: true
+        App\Sms\SmsSender: '@App\Sms\InMemorySmsSender'

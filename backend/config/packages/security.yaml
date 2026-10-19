@@ -1,0 +1,35 @@
+security:
+    providers:
+        # Le jeton JWT porte l'identifiant (UUID) de l'utilisateur, jamais son numéro.
+        app_user_provider:
+            entity:
+                class: App\Entity\User
+                property: id
+
+    firewalls:
+        dev:
+            # Ensure dev tools and static assets are always allowed
+            pattern: ^/(_profiler|_wdt|assets|build)/
+            security: false
+        api:
+            pattern: ^/api
+            stateless: true
+            provider: app_user_provider
+            user_checker: App\Security\UserChecker
+            jwt: ~
+        main:
+            lazy: true
+            provider: app_user_provider
+
+    # Le backend est l'autorité (§4.5) : tout /api est fermé sauf la liste publique ci-dessous.
+    # Chaque opération vérifie ensuite rôle, propriété et état métier (voters, machine à états).
+    access_control:
+        - { path: ^/api/auth/(request-otp|verify-otp|refresh|logout)$, roles: PUBLIC_ACCESS }
+        - { path: ^/api/(categories|services|service-areas)(/|$|\.), roles: PUBLIC_ACCESS }
+        - { path: ^/api/(docs|contexts|validation_errors|\.well-known)(/|$|\.), roles: PUBLIC_ACCESS }
+        - { path: ^/api(/index(\.\w+)?)?$, roles: PUBLIC_ACCESS }
+        - { path: ^/api/admin, roles: ROLE_ADMIN }
+        - { path: ^/api, roles: IS_AUTHENTICATED_FULLY }
+
+    role_hierarchy:
+        ROLE_ADMIN: [ROLE_SUPPORT]

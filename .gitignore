@@ -1,0 +1,7 @@
+# Racine du monorepo — chaque application garde aussi son propre .gitignore
+/.env
+.env.local
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

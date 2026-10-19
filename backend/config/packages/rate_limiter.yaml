@@ -1,0 +1,26 @@
+# Protection contre les abus OTP (cahier des charges §5.1, §15.3).
+framework:
+    cache:
+        pools:
+            # Pool dédié : à brancher sur Redis quand l'API tournera sur plusieurs serveurs.
+            cache.otp_limiter:
+                adapter: cache.app
+    rate_limiter:
+        otp_phone:
+            policy: sliding_window
+            limit: 3
+            interval: '10 minutes'
+            cache_pool: cache.otp_limiter
+        otp_ip:
+            policy: sliding_window
+            limit: 20
+            interval: '10 minutes'
+            cache_pool: cache.otp_limiter
+
+when@test:
+    framework:
+        cache:
+            pools:
+                # Un pool « array » serait vidé entre deux requêtes ; ApiTestCase le vide avant chaque test.
+                cache.otp_limiter:
+                    adapter: cache.adapter.filesystem

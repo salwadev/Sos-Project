@@ -1,0 +1,6 @@
+lexik_jwt_authentication:
+    secret_key: '%env(resolve:JWT_SECRET_KEY)%'
+    public_key: '%env(resolve:JWT_PUBLIC_KEY)%'
+    pass_phrase: '%env(JWT_PASSPHRASE)%'
+    # Jeton d'accès court ; la session est prolongée par /api/auth/refresh (§14.1).
+    token_ttl: 900

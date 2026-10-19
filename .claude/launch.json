@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backend",
+      "runtimeExecutable": "symfony",
+      "runtimeArgs": ["server:start", "--no-tls", "--allow-http", "--port=8000", "--dir=backend"],
+      "port": 8000
+    },
+    {
+      "name": "backoffice",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "backoffice", "run", "dev", "--", "--port", "5173", "--strictPort"],
+      "port": 5173
+    },
+    {
+      "name": "mobile-web",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["mobile/node_modules/expo/bin/cli", "start", "mobile", "--web", "--port", "8081"],
+      "port": 8081
+    }
+  ]
+}
