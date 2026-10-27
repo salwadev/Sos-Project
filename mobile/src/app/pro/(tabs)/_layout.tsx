@@ -1,10 +1,13 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { Tabs } from 'expo-router';
+import { Redirect, Tabs } from 'expo-router';
 import type { ComponentProps } from 'react';
 import type { ColorValue } from 'react-native';
 
+import { proApi } from '@/api/endpoints';
 import { Colors } from '@/constants/theme';
+import { useApiQuery } from '@/hooks/use-api-query';
 import { useI18n } from '@/i18n/i18n-context';
+import { isMissingProfile } from '@/utils/pro';
 
 type IconName = ComponentProps<typeof Ionicons>['name'];
 
@@ -17,6 +20,12 @@ function tabIcon(active: IconName, inactive: IconName) {
 export default function ProTabsLayout() {
   const { t } = useI18n();
   const tabs = t.proSpace.tabs;
+  const profile = useApiQuery('pro-profile', proApi.profile);
+
+  // Compte sans profil professionnel : inscription d'abord (§6.1).
+  if (isMissingProfile(profile.error)) {
+    return <Redirect href="/pro/onboarding" />;
+  }
 
   return (
     <Tabs

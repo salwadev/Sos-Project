@@ -5,6 +5,7 @@ namespace App\State\Intervention;
 use App\ApiResource\Intervention\InterventionView;
 use App\Entity\Commission;
 use App\Entity\Intervention;
+use App\Entity\Payment;
 use App\Entity\Review;
 use App\Entity\User;
 use Doctrine\ORM\EntityManagerInterface;
@@ -33,6 +34,7 @@ final class InterventionViews
             $intervention,
             $this->currentUser(),
             $this->em->getRepository(Commission::class)->findOneBy(['intervention' => $intervention]),
+            $this->em->getRepository(Payment::class)->findOneBy(['intervention' => $intervention]),
             $this->em->getRepository(Review::class)->findOneBy(['intervention' => $intervention]),
         );
     }

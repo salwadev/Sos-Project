@@ -89,6 +89,8 @@ export const interventionsApi = {
     }),
   confirmCompletion: (id: string) =>
     apiFetch<Intervention>(`/interventions/${id}/confirm-completion`, { method: 'POST', body: {} }),
+  confirmCashPayment: (id: string) =>
+    apiFetch<Intervention>(`/interventions/${id}/payment/confirm-cash`, { method: 'POST', body: {} }),
   dispute: (id: string, reason: string) =>
     apiFetch<Intervention>(`/interventions/${id}/dispute`, { method: 'POST', body: { reason } }),
   review: (id: string, rating: number, comment?: string) =>

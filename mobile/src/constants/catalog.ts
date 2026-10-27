@@ -23,6 +23,7 @@ const SERVICE_ICONS: Record<string, McIconName> = {
   glazing: 'window-closed-variant',
   air_conditioning: 'air-conditioner',
   appliances: 'washing-machine',
+  housekeeping: 'broom',
   battery: 'car-battery',
   tyre: 'tire',
   roadside: 'car-wrench',

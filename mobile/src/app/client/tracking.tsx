@@ -1,101 +1,222 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
-import { router } from 'expo-router';
-import { useEffect, useState, type ComponentProps } from 'react';
-import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { router, useLocalSearchParams } from 'expo-router';
+import { useState } from 'react';
+import { StyleSheet, Text, TextInput, View } from 'react-native';
 
+import { interventionsApi } from '@/api/endpoints';
+import type { Intervention } from '@/api/types';
+import { ErrorNotice, LoadingView } from '@/components/error-notice';
 import { FakeMap } from '@/components/fake-map';
 import { MapSheetLayout } from '@/components/map-sheet-layout';
 import { Avatar } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { ScreenHeader } from '@/components/ui/screen-header';
+import { POLL_INTERVAL_MS } from '@/constants/config';
 import { Colors, Radius, Shadow, Spacing, Typography } from '@/constants/theme';
-import { interpolate } from '@/i18n';
+import { useAction } from '@/hooks/use-action';
+import { useApiQuery } from '@/hooks/use-api-query';
+import { interpolate, type Translations } from '@/i18n';
 import { useI18n } from '@/i18n/i18n-context';
-import { mockClient, mockPro } from '@/mocks/client-flow';
+import { formatMillimes, formatTime, minutesUntil } from '@/utils/format';
 
-/** Délai simulé avant l'arrivée du professionnel et l'envoi du devis. */
-const FAKE_ARRIVAL_DELAY_MS = 5000;
+const DISPUTE_MIN_LENGTH = 10;
 
+function headline(intervention: Intervention, t: Translations): string {
+  const name = intervention.professional.displayName;
+  const titles: Record<Intervention['status'], string> = {
+    confirmed: t.tracking.confirmedTitle,
+    on_the_way: t.tracking.title,
+    on_site: t.tracking.arrivedTitle,
+    working: t.tracking.workingTitle,
+    completion_declared: t.tracking.completionDeclaredTitle,
+    completed: t.tracking.completedTitle,
+    disputed: t.tracking.disputedTitle,
+    cancelled: t.tracking.cancelledTitle,
+  };
+  return interpolate(titles[intervention.status], { name });
+}
+
+/**
+ * Suivi de l'intervention confirmée (§5.6) : étapes déclarées par le professionnel, devis à accepter,
+ * puis confirmation de fin ou signalement d'un problème (§5.7). Relu toutes les 5 s faute de push.
+ */
 export default function Tracking() {
   const { t } = useI18n();
-  const [arrived, setArrived] = useState(false);
-  const firstName = mockPro.name.split(' ')[0];
+  const { id = '' } = useLocalSearchParams<{ id?: string }>();
+  const query = useApiQuery(`intervention:${id}`, () => interventionsApi.get(id), POLL_INTERVAL_MS);
+  const action = useAction();
+  const [disputeOpen, setDisputeOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const intervention = query.data;
 
-  useEffect(() => {
-    const id = setTimeout(() => setArrived(true), FAKE_ARRIVAL_DELAY_MS);
-    return () => clearTimeout(id);
-  }, []);
+  const confirmCompletion = async () => {
+    const done = await action.run(() => interventionsApi.confirmCompletion(id), query.refresh);
+    if (done) {
+      router.replace({ pathname: '/client/review', params: { id } });
+    }
+  };
+
+  const sendDispute = async () => {
+    const disputed = await action.run(() => interventionsApi.dispute(id, reason.trim()), query.refresh);
+    if (disputed) {
+      setDisputeOpen(false);
+      setReason('');
+      query.refresh();
+    }
+  };
+
+  if (!intervention) {
+    return (
+      <MapSheetLayout
+        map={<FakeMap variant="tracking" style={StyleSheet.absoluteFill} />}
+        header={<ScreenHeader overlay title={t.tracking.loadingTitle} onBack={() => router.dismissTo('/client')} />}>
+        {query.loading ? <LoadingView /> : null}
+        <ErrorNotice error={query.error} onRetry={query.refresh} />
+      </MapSheetLayout>
+    );
+  }
+
+  const status = intervention.status;
+  const eta = status === 'on_the_way' ? minutesUntil(intervention.estimatedArrivalAt) : null;
+  const canDispute = ['on_site', 'working', 'completion_declared', 'completed'].includes(status) && !intervention.review;
+  const reached = (ts: string | null) => (ts ? 'done' : 'pending') as 'done' | 'pending';
+  // Montant à remettre en espèces : annoncé dès la fin déclarée, puis celui du paiement enregistré à la clôture.
+  const cashAmount =
+    intervention.payment?.method === 'cash_direct'
+      ? intervention.payment.amountMillimes
+      : status === 'completion_declared' && intervention.acceptedQuote
+        ? intervention.acceptedQuote.totalMillimes
+        : null;
+
+  const footer = (
+    <>
+      <ErrorNotice error={action.error} />
+      {intervention.pendingQuote ? (
+        <Button label={t.tracking.viewQuote} onPress={() => router.push({ pathname: '/client/quote', params: { id } })} />
+      ) : null}
+      {status === 'completion_declared' ? (
+        <Button label={t.tracking.confirmCompletion} loading={action.pending} onPress={confirmCompletion} />
+      ) : null}
+      {status === 'completed' && !intervention.review ? (
+        <Button label={t.tracking.leaveReview} onPress={() => router.push({ pathname: '/client/review', params: { id } })} />
+      ) : null}
+      {canDispute && !disputeOpen ? (
+        <Button label={t.tracking.reportProblem} variant="ghost" onPress={() => setDisputeOpen(true)} />
+      ) : null}
+    </>
+  );
 
   return (
     <MapSheetLayout
       map={<FakeMap variant="tracking" style={StyleSheet.absoluteFill} />}
-      header={
-        <ScreenHeader overlay title={interpolate(arrived ? t.tracking.arrivedTitle : t.tracking.title, { name: firstName })} />
-      }
+      header={<ScreenHeader overlay title={headline(intervention, t)} onBack={() => router.dismissTo('/client')} />}
       floating={
-        !arrived ? (
+        eta !== null ? (
           <View style={styles.eta}>
-            <Text style={styles.etaText}>{interpolate(t.tracking.eta, { minutes: mockPro.etaMinutes })}</Text>
+            <Text style={styles.etaText}>{interpolate(t.tracking.eta, { minutes: eta })}</Text>
           </View>
         ) : null
       }
-      footer={arrived ? <Button label={t.tracking.viewQuote} onPress={() => router.push('/client/quote')} /> : null}>
+      footer={footer}>
+      <ErrorNotice error={query.error} onRetry={query.refresh} />
+
       <View style={styles.proRow}>
-        <Avatar name={mockPro.name} size={52} verified />
+        <Avatar name={intervention.professional.displayName} size={52} verified />
         <View style={styles.grow}>
           <Text style={Typography.bodyStrong}>
-            {mockPro.name} <Text style={styles.trade}>· {t.services.plumbing}</Text>
+            {intervention.professional.displayName}{' '}
+            <Text style={styles.trade}>· {intervention.request.serviceName}</Text>
           </Text>
-          <Text style={Typography.small}>{arrived ? t.tracking.onSite : t.tracking.onTheWayTo}</Text>
-          <View style={styles.addressRow}>
-            <Ionicons name="location" size={13} color={Colors.textSecondary} />
-            <Text style={Typography.small}>{mockClient.address}</Text>
-          </View>
+          <Text style={Typography.small}>
+            {t.interventionStatus[status]} · #{intervention.request.reference}
+          </Text>
+          {intervention.address ? (
+            <View style={styles.addressRow}>
+              <Ionicons name="location" size={13} color={Colors.textSecondary} />
+              <Text style={Typography.small}>{intervention.address.addressLine}</Text>
+            </View>
+          ) : null}
         </View>
-        <RoundAction icon="call" label={t.tracking.call} onPress={() => Linking.openURL('tel:+21600000000')} />
-        <RoundAction icon="chatbox-ellipses-outline" label={t.tracking.message} />
       </View>
 
       <Stepper
         steps={[
-          { key: 'confirmed', label: t.tracking.confirmed, time: mockPro.confirmedAt, state: 'done' },
-          { key: 'onTheWay', label: t.tracking.onTheWay, time: mockPro.onTheWayAt, state: arrived ? 'done' : 'current' },
-          { key: 'onSite', label: t.tracking.onSite, time: arrived ? '09:36' : '--:--', state: arrived ? 'done' : 'pending' },
+          { key: 'confirmed', label: t.tracking.confirmed, time: '', state: 'done' },
+          {
+            key: 'onTheWay',
+            label: t.tracking.onTheWay,
+            time: formatTime(intervention.onTheWayAt),
+            state: intervention.arrivedAt ? 'done' : intervention.onTheWayAt ? 'current' : 'pending',
+          },
+          { key: 'onSite', label: t.tracking.onSite, time: formatTime(intervention.arrivedAt), state: reached(intervention.arrivedAt) },
         ]}
       />
+      {status === 'on_the_way' ? <Text style={[Typography.small, styles.center]}>{t.tracking.etaDisclaimer}</Text> : null}
 
-      {arrived ? (
+      {intervention.pendingQuote ? (
         <Card tone="primarySoft">
           <View style={styles.quoteRow}>
             <Ionicons name="document-text-outline" size={24} color={Colors.primaryDark} />
-            <Text style={[Typography.bodyStrong, styles.grow]}>{interpolate(t.tracking.quoteReady, { name: firstName })}</Text>
+            <Text style={[Typography.bodyStrong, styles.grow]}>
+              {interpolate(t.tracking.quoteReady, { name: intervention.professional.displayName })}
+            </Text>
           </View>
         </Card>
-      ) : (
-        <Text style={[Typography.small, styles.center]}>{t.tracking.etaDisclaimer}</Text>
-      )}
-    </MapSheetLayout>
-  );
-}
+      ) : null}
 
-function RoundAction({
-  icon,
-  label,
-  onPress,
-}: {
-  icon: ComponentProps<typeof Ionicons>['name'];
-  label: string;
-  onPress?: () => void;
-}) {
-  return (
-    <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} style={styles.action}>
-      <View style={styles.actionCircle}>
-        <Ionicons name={icon} size={22} color={Colors.primaryDark} />
-      </View>
-      <Text style={styles.actionLabel}>{label}</Text>
-    </Pressable>
+      {intervention.acceptedQuote ? (
+        <Card>
+          <View style={styles.quoteRow}>
+            <MaterialCommunityIcons name="file-document-check-outline" size={24} color={Colors.text} />
+            <Text style={[Typography.body, styles.grow]}>
+              {interpolate(t.tracking.acceptedQuote, { n: intervention.acceptedQuote.version })}
+            </Text>
+            <Text style={Typography.bodyStrong}>{formatMillimes(intervention.acceptedQuote.totalMillimes)}</Text>
+          </View>
+        </Card>
+      ) : null}
+
+      {cashAmount !== null ? (
+        <Card tone={intervention.payment?.status === 'confirmed' ? undefined : 'warning'}>
+          <View style={styles.quoteRow}>
+            <MaterialCommunityIcons name="cash-multiple" size={24} color={Colors.text} />
+            <Text style={[Typography.body, styles.grow]}>
+              {intervention.payment?.status === 'confirmed' ? t.tracking.cashPaid : t.tracking.cashToPay}
+            </Text>
+            <Text style={Typography.bodyStrong}>{formatMillimes(cashAmount)}</Text>
+          </View>
+        </Card>
+      ) : null}
+
+      {status === 'completion_declared' ? <Text style={Typography.caption}>{t.tracking.confirmHint}</Text> : null}
+      {status === 'disputed' ? <Text style={Typography.caption}>{t.tracking.disputed}</Text> : null}
+      {intervention.review ? <Text style={Typography.caption}>{t.review.thanks}</Text> : null}
+
+      {disputeOpen ? (
+        <View style={styles.dispute}>
+          <Text style={Typography.bodyStrong}>{t.tracking.reportProblem}</Text>
+          <TextInput
+            value={reason}
+            onChangeText={setReason}
+            placeholder={t.tracking.disputePlaceholder}
+            placeholderTextColor={Colors.textMuted}
+            multiline
+            maxLength={1000}
+            style={styles.disputeInput}
+          />
+          <Button
+            label={t.tracking.disputeSubmit}
+            variant="danger"
+            disabled={reason.trim().length < DISPUTE_MIN_LENGTH}
+            loading={action.pending}
+            onPress={sendDispute}
+          />
+          <Button label={t.common.cancel} variant="ghost" onPress={() => setDisputeOpen(false)} />
+        </View>
+      ) : null}
+    </MapSheetLayout>
   );
 }
 
@@ -119,7 +240,7 @@ function Stepper({ steps }: { steps: Step[] }) {
             />
           </View>
           <Text style={[styles.stepLabel, step.state === 'pending' && styles.stepLabelPending]}>{step.label}</Text>
-          <Text style={Typography.small}>{step.time}</Text>
+          {step.time ? <Text style={Typography.small}>{step.time}</Text> : null}
         </View>
       ))}
     </View>
@@ -157,16 +278,6 @@ const styles = StyleSheet.create({
   grow: { flex: 1 },
   trade: { fontWeight: '400', color: Colors.textSecondary, fontSize: 13 },
   addressRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 2 },
-  action: { alignItems: 'center', gap: 4 },
-  actionCircle: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    backgroundColor: Colors.primarySoft,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  actionLabel: { fontSize: 11, fontWeight: '600', color: Colors.text },
   stepper: { flexDirection: 'row', marginTop: Spacing.sm },
   step: { flex: 1, alignItems: 'center', gap: 4 },
   stepTrack: { flexDirection: 'row', alignItems: 'center', alignSelf: 'stretch' },
@@ -181,4 +292,15 @@ const styles = StyleSheet.create({
   dotPending: { width: 26, height: 26, borderWidth: 3, borderColor: Colors.border, backgroundColor: Colors.background },
   quoteRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm + 4 },
   center: { textAlign: 'center' },
+  dispute: { gap: Spacing.sm },
+  disputeInput: {
+    minHeight: 80,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: Radius.md,
+    padding: Spacing.md,
+    fontSize: 15,
+    color: Colors.text,
+    textAlignVertical: 'top',
+  },
 });

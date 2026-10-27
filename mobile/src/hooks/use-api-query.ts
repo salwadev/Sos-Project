@@ -13,6 +13,7 @@ export function useApiQuery<T>(key: string | null, fetcher: () => Promise<T>, po
   const [state, setState] = useState<QueryState<T>>({ loading: key !== null });
   const fetcherRef = useRef(fetcher);
   const sequence = useRef(0);
+  const inFlight = useRef(0);
 
   useEffect(() => {
     fetcherRef.current = fetcher;
@@ -23,6 +24,7 @@ export function useApiQuery<T>(key: string | null, fetcher: () => Promise<T>, po
       return;
     }
     const id = ++sequence.current;
+    inFlight.current++;
     try {
       const data = await fetcherRef.current();
       if (id === sequence.current) {
@@ -32,6 +34,8 @@ export function useApiQuery<T>(key: string | null, fetcher: () => Promise<T>, po
       if (id === sequence.current) {
         setState((previous) => ({ data: previous.data, error, loading: false }));
       }
+    } finally {
+      inFlight.current--;
     }
   }, [key]);
 
@@ -42,7 +46,8 @@ export function useApiQuery<T>(key: string | null, fetcher: () => Promise<T>, po
         return undefined;
       }
       const timer = setInterval(() => {
-        if (AppState.currentState === 'active') {
+        // Serveur lent ou réseau faible : on saute un tour plutôt que d'empiler les requêtes.
+        if (AppState.currentState === 'active' && inFlight.current === 0) {
           load();
         }
       }, pollMs);

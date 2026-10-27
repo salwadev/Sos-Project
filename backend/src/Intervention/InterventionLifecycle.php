@@ -9,9 +9,12 @@ use App\Domain\Request\ServiceRequestStateMachine;
 use App\Entity\Commission;
 use App\Entity\Complaint;
 use App\Entity\Intervention;
+use App\Entity\Payment;
 use App\Entity\ServiceRequest;
 use App\Entity\User;
 use App\Enum\InterventionStatus;
+use App\Enum\PaymentMethod;
+use App\Enum\PaymentStatus;
 use App\Enum\ServiceRequestStatus;
 use App\Matching\RequestLock;
 use Doctrine\ORM\EntityManagerInterface;
@@ -19,7 +22,8 @@ use Doctrine\ORM\EntityManagerInterface;
 /**
  * Déroulé d'une intervention après la confirmation du client (§5.6, §5.7, §6.6) :
  * - le professionnel déclare « en route », « sur place », « travaux commencés » (ACCEPTED → IN_PROGRESS) puis la fin ;
- * - le client confirme la fin (IN_PROGRESS → COMPLETED, commission calculée une seule fois, §16.1) ou conteste.
+ * - le client confirme la fin (IN_PROGRESS → COMPLETED, commission calculée une seule fois, §16.1) ou conteste ;
+ * - le paiement en espèces est alors déclaré, puis le professionnel confirme l'avoir reçu.
  *
  * Comme pour les offres, chaque décision passe par RequestLock et revérifie l'état relu en base :
  * deux confirmations simultanées ne peuvent pas créer deux commissions.
@@ -104,6 +108,8 @@ final class InterventionLifecycle
             $intervention->setStatus(InterventionStatus::Completed, Clock::now());
             $commission = $this->commissions->commissionFor($intervention);
             $this->em->persist($commission);
+            // Paiement direct en espèces (§9.3) : déclaré pour le total du devis accepté, confirmé ensuite par le pro.
+            $this->em->persist(new Payment($intervention, PaymentMethod::CashDirect, $commission->getBaseMillimes()));
 
             return $commission;
         });
@@ -117,6 +123,37 @@ final class InterventionLifecycle
         ]);
 
         return $commission;
+    }
+
+    /**
+     * Le professionnel assigné confirme avoir reçu le paiement en espèces déclaré à la clôture (§9.3, §9.6).
+     * Possible même si le client conteste ensuite : la remise de l'argent reste un fait à tracer.
+     */
+    public function confirmCashReceived(Intervention $intervention, User $professional): Payment
+    {
+        $payment = $this->lock->run($intervention->getRequest(), function () use ($intervention): Payment {
+            $payment = $this->em->getRepository(Payment::class)->findOneBy(['intervention' => $intervention]);
+            if (null === $payment) {
+                throw new InterventionConflict('Le client n\'a pas encore confirmé la fin de l\'intervention.');
+            }
+            $this->em->refresh($payment);
+            if (PaymentMethod::CashDirect !== $payment->getMethod()) {
+                throw new InterventionConflict('Ce paiement n\'est pas un paiement en espèces.');
+            }
+            if (PaymentStatus::Declared !== $payment->getStatus()) {
+                throw new InterventionConflict('Ce paiement a déjà été confirmé.');
+            }
+            $payment->setStatus(PaymentStatus::Confirmed);
+
+            return $payment;
+        });
+
+        $this->audit->record('payment.cash_confirmed', $professional, 'Payment', $payment->getId()->toRfc4122(), [
+            'request' => $intervention->getRequest()->getReference(),
+            'grossMillimes' => $payment->getGrossMillimes(),
+        ]);
+
+        return $payment;
     }
 
     /**

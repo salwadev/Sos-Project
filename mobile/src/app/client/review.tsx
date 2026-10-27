@@ -1,8 +1,10 @@
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 import Svg, { Circle, G, Line, Path } from 'react-native-svg';
 
+import { interventionsApi } from '@/api/endpoints';
+import { ErrorNotice, LoadingView } from '@/components/error-notice';
 import { ProSummary } from '@/components/pro-summary';
 import { Screen } from '@/components/screen';
 import { Button } from '@/components/ui/button';
@@ -10,68 +12,98 @@ import { Card } from '@/components/ui/card';
 import { IconTile } from '@/components/ui/icon-tile';
 import { StarInput } from '@/components/ui/stars';
 import { Colors, Radius, Spacing, Typography } from '@/constants/theme';
+import { useAction } from '@/hooks/use-action';
+import { useApiQuery } from '@/hooks/use-api-query';
 import { useI18n } from '@/i18n/i18n-context';
-import { mockQuote } from '@/mocks/client-flow';
-import { formatTND } from '@/utils/format';
+import { formatMillimes } from '@/utils/format';
 
 const MAX_COMMENT = 500;
 
 /** Avis possible uniquement pour une intervention terminée et confirmée (§5.7). */
 export default function Review() {
   const { t } = useI18n();
-  const [rating, setRating] = useState(4);
+  const { id = '' } = useLocalSearchParams<{ id?: string }>();
+  const query = useApiQuery(`intervention:${id}`, () => interventionsApi.get(id));
+  const action = useAction();
+  const [rating, setRating] = useState(0);
   const [comment, setComment] = useState('');
+  const intervention = query.data;
+  const reviewed = intervention?.review !== null && intervention?.review !== undefined;
+
+  const publish = async () => {
+    const saved = await action.run(() => interventionsApi.review(id, rating, comment.trim()), query.refresh);
+    if (saved) {
+      router.dismissTo('/client');
+    }
+  };
 
   return (
     <Screen
       edges={['top', 'left', 'right', 'bottom']}
       footer={
         <>
-          <Button label={t.review.publish} disabled={rating === 0} onPress={() => router.dismissTo('/client')} />
+          <ErrorNotice error={action.error} />
+          {reviewed ? (
+            <Button label={t.review.backHome} onPress={() => router.dismissTo('/client')} />
+          ) : (
+            <Button label={t.review.publish} disabled={rating === 0} loading={action.pending} onPress={publish} />
+          )}
           <Button label={t.review.support} variant="ghost" onPress={() => router.push('/client/help')} />
         </>
       }>
+      {query.loading ? <LoadingView /> : null}
+      <ErrorNotice error={query.error} onRetry={query.refresh} />
       <View style={styles.hero}>
         <SuccessMark />
         <Text style={[Typography.title, styles.center]}>{t.review.headline}</Text>
         <Text style={[Typography.caption, styles.center]}>{t.review.subtitle}</Text>
       </View>
 
-      <Card>
-        <ProSummary chevron />
-      </Card>
+      {intervention ? (
+        <Card>
+          <ProSummary professional={intervention.professional} subtitle={intervention.request.serviceName} />
+        </Card>
+      ) : null}
 
-      <Text style={Typography.heading}>{t.review.question}</Text>
-      <StarInput value={rating} onChange={setRating} />
+      {reviewed ? (
+        <Text style={[Typography.body, styles.center]}>{t.review.thanks}</Text>
+      ) : (
+        <>
+          <Text style={Typography.heading}>{t.review.question}</Text>
+          <StarInput value={rating} onChange={setRating} />
 
-      <View style={styles.commentBox}>
-        <Text style={Typography.small}>
-          {t.review.comment} · {t.newRequest.optional}
-        </Text>
-        <TextInput
-          value={comment}
-          onChangeText={setComment}
-          placeholder={t.review.commentPlaceholder}
-          placeholderTextColor={Colors.textMuted}
-          multiline
-          maxLength={MAX_COMMENT}
-          style={styles.comment}
-        />
-        <Text style={styles.counter}>
-          {comment.length}/{MAX_COMMENT}
-        </Text>
-      </View>
-
-      <Card>
-        <View style={styles.summaryRow}>
-          <IconTile icon="tools" color={Colors.text} background={Colors.surface} size={40} />
-          <View style={styles.grow}>
-            <Text style={Typography.bodyStrong}>{t.quote.job}</Text>
-            <Text style={Typography.small}>{t.review.directPayment}</Text>
+          <View style={styles.commentBox}>
+            <Text style={Typography.small}>
+              {t.review.comment} · {t.newRequest.optional}
+            </Text>
+            <TextInput
+              value={comment}
+              onChangeText={setComment}
+              placeholder={t.review.commentPlaceholder}
+              placeholderTextColor={Colors.textMuted}
+              multiline
+              maxLength={MAX_COMMENT}
+              style={styles.comment}
+            />
+            <Text style={styles.counter}>
+              {comment.length}/{MAX_COMMENT}
+            </Text>
           </View>
-          <Text style={Typography.bodyStrong}>{formatTND(mockQuote.total)}</Text>
-        </View>
-      </Card>
+        </>
+      )}
+
+      {intervention?.acceptedQuote ? (
+        <Card>
+          <View style={styles.summaryRow}>
+            <IconTile icon="tools" color={Colors.text} background={Colors.surface} size={40} />
+            <View style={styles.grow}>
+              <Text style={Typography.bodyStrong}>{intervention.request.serviceName}</Text>
+              <Text style={Typography.small}>{t.review.directPayment}</Text>
+            </View>
+            <Text style={Typography.bodyStrong}>{formatMillimes(intervention.acceptedQuote.totalMillimes)}</Text>
+          </View>
+        </Card>
+      ) : null}
     </Screen>
   );
 }

@@ -5,6 +5,7 @@ namespace App\Tests\Functional;
 use App\Entity\AuditLog;
 use App\Entity\Commission;
 use App\Entity\Complaint;
+use App\Entity\Payment;
 use App\Entity\ProfessionalProfile;
 use App\Entity\Quote;
 use App\Entity\Review;
@@ -12,6 +13,7 @@ use App\Entity\Service;
 use App\Entity\ServiceArea;
 use App\Entity\ServiceRequest;
 use App\Enum\CommissionStatus;
+use App\Enum\PaymentStatus;
 use App\Tests\Support\ApiTestCase;
 use App\Tests\Support\DrivesMatching;
 use App\Tests\Support\Factory;
@@ -158,6 +160,7 @@ final class InterventionApiTest extends ApiTestCase
         self::assertSame(CommissionStatus::Due, $commission->getStatus());
         $proView = $this->api('GET', "/api/interventions/$id", token: $samiToken);
         self::assertSame(6_500, $proView['commission']['amountMillimes']);
+        self::assertSame(['method' => 'cash_direct', 'status' => 'declared', 'amountMillimes' => 65_000, 'currency' => 'TND'], $done['payment']);
 
         self::assertSame([
             'DRAFT→SUBMITTED', 'SUBMITTED→SEARCHING', 'SEARCHING→OFFERED', 'OFFERED→ACCEPTED',
@@ -330,6 +333,35 @@ final class InterventionApiTest extends ApiTestCase
         $this->api('POST', "/api/interventions/$id/reviews", ['rating' => 1], $clientToken);
         self::assertSame(409, $this->httpStatus(), 'Pas d\'avis sur une intervention contestée et non close.');
         self::assertSame(0, $this->commissionsCount());
+    }
+
+    public function testOnlyTheAssignedProfessionalConfirmsTheCashPaymentOnce(): void
+    {
+        $otherProToken = $this->tokenFor(Factory::professional($this->em())->getUser());
+        [$id, $clientToken, $samiToken] = $this->confirmedIntervention();
+        $this->startWork($id, $clientToken, $samiToken);
+        $this->step($id, 'completion_declared', $samiToken);
+
+        $this->api('POST', "/api/interventions/$id/payment/confirm-cash", null, $samiToken);
+        self::assertSame(409, $this->httpStatus(), 'Pas de paiement avant la confirmation de fin par le client.');
+        self::assertCount(0, $this->em()->getRepository(Payment::class)->findAll());
+
+        $this->api('POST', "/api/interventions/$id/confirm-completion", null, $clientToken);
+        $this->api('POST', "/api/interventions/$id/payment/confirm-cash", null, $clientToken);
+        self::assertSame(403, $this->httpStatus(), 'Le client ne confirme pas la réception à la place du professionnel.');
+        $this->api('POST', "/api/interventions/$id/payment/confirm-cash", null, $otherProToken);
+        self::assertSame(403, $this->httpStatus());
+
+        $paid = $this->api('POST', "/api/interventions/$id/payment/confirm-cash", null, $samiToken);
+        self::assertSame(200, $this->httpStatus());
+        self::assertSame('confirmed', $paid['payment']['status']);
+        self::assertSame(PaymentStatus::Confirmed, $this->em()->getRepository(Payment::class)->findAll()[0]->getStatus());
+        self::assertSame('confirmed', $this->api('GET', "/api/interventions/$id", token: $clientToken)['payment']['status']);
+        self::assertNotNull($this->em()->getRepository(AuditLog::class)->findOneBy(['action' => 'payment.cash_confirmed']));
+
+        $this->api('POST', "/api/interventions/$id/payment/confirm-cash", null, $samiToken);
+        self::assertSame(409, $this->httpStatus(), 'Une seule confirmation.');
+        self::assertCount(1, $this->em()->getRepository(Payment::class)->findAll());
     }
 
     public function testADisputeAfterCompletionKeepsTheCommissionForTheSupport(): void

@@ -1,45 +1,71 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
+import { offersApi, proApi } from '@/api/endpoints';
+import { ErrorNotice, LoadingView } from '@/components/error-notice';
 import { FakeMap } from '@/components/fake-map';
 import { Screen } from '@/components/screen';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { ScreenHeader } from '@/components/ui/screen-header';
+import { serviceIcon } from '@/constants/catalog';
+import { POLL_INTERVAL_MS } from '@/constants/config';
 import { Colors, Radius, Spacing, Typography } from '@/constants/theme';
-import { useCountdown } from '@/hooks/use-countdown';
+import { useAction } from '@/hooks/use-action';
+import { useApiQuery } from '@/hooks/use-api-query';
+import { useSecondsUntil } from '@/hooks/use-countdown';
 import { interpolate } from '@/i18n';
 import { useI18n } from '@/i18n/i18n-context';
-import { mockIncoming, proDemo, useProDemo } from '@/mocks/pro-flow';
-import { formatCountdown, formatTND } from '@/utils/format';
+import { formatCountdown, formatMillimes, parseTNDToMillimes } from '@/utils/format';
 
 /**
  * Sollicitation reçue (§6.4) : zone approximative seulement, l'adresse exacte n'est révélée qu'après confirmation.
- * « Proposer et réserver » réserve temporairement la demande ; côté API, l'acceptation est atomique (§6.5).
+ * « Proposer et réserver » réserve temporairement la demande ; côté API, l'acceptation est atomique (§6.5) :
+ * si un autre professionnel a été plus rapide, le 409 est affiché tel quel.
  */
 export default function IncomingRequest() {
   const { t } = useI18n();
   const s = t.proSpace.request;
-  const { travelFee } = useProDemo();
-  const remaining = useCountdown(mockIncoming.responseSeconds);
-  const expired = remaining === 0;
+  const { id = '' } = useLocalSearchParams<{ id?: string }>();
+  const offers = useApiQuery('pro-offers', proApi.offers, POLL_INTERVAL_MS);
+  const offer = offers.data?.find((o) => o.id === id);
+  const remaining = useSecondsUntil(offer?.respondBefore ?? null);
+  const [fee, setFee] = useState<number | null>(null);
   const [editingFee, setEditingFee] = useState(false);
-  const [feeInput, setFeeInput] = useState(String(travelFee));
+  const [feeInput, setFeeInput] = useState('');
+  const action = useAction();
+
+  const travelFee = fee ?? offer?.travelFeeMillimes ?? 0;
+  const open = offer?.status === 'sent' && remaining > 0;
+
+  const startEditing = () => {
+    setFeeInput(String(travelFee / 1000));
+    setEditingFee(true);
+  };
 
   const commitFee = () => {
-    const value = Number(feeInput.replace(',', '.'));
-    if (Number.isFinite(value) && value >= 0) {
-      proDemo.setTravelFee(value);
+    const value = parseTNDToMillimes(feeInput);
+    if (value !== null) {
+      setFee(value);
     }
     setEditingFee(false);
   };
 
-  const propose = () => {
-    proDemo.setStage('proposed');
-    router.dismissTo('/pro');
+  const propose = async () => {
+    const reserved = await action.run(() => offersApi.accept(id, travelFee), offers.refresh);
+    if (reserved) {
+      router.dismissTo('/pro');
+    }
+  };
+
+  const decline = async () => {
+    const declined = await action.run(() => offersApi.decline(id), offers.refresh);
+    if (declined) {
+      router.dismissTo('/pro');
+    }
   };
 
   return (
@@ -48,79 +74,100 @@ export default function IncomingRequest() {
       header={<ScreenHeader title={s.title} onBack={() => router.dismissTo('/pro')} />}
       footer={
         <>
-          <Button label={s.propose} disabled={expired || editingFee} onPress={propose} />
-          <Text style={[Typography.caption, styles.center]}>{s.proposeHint}</Text>
-          <Button label={s.decline} variant="outline" onPress={() => router.dismissTo('/pro')} />
+          <ErrorNotice error={action.error} />
+          {open ? (
+            <>
+              <Button label={s.propose} disabled={editingFee} loading={action.pending} onPress={propose} />
+              <Text style={[Typography.caption, styles.center]}>{s.proposeHint}</Text>
+              <Button label={s.decline} variant="outline" disabled={action.pending} onPress={decline} />
+            </>
+          ) : (
+            <Button label={s.back} variant="outline" onPress={() => router.dismissTo('/pro')} />
+          )}
         </>
       }>
-      <View style={[styles.timer, expired && styles.timerExpired]}>
-        <Ionicons name="time-outline" size={22} color={expired ? Colors.danger : Colors.text} />
-        <Text style={[styles.timerText, expired && styles.timerTextExpired]}>
-          {expired ? s.expired : interpolate(s.respondIn, { time: formatCountdown(remaining) })}
-        </Text>
-      </View>
+      {offers.loading ? <LoadingView /> : null}
+      <ErrorNotice error={offers.error} onRetry={offers.refresh} />
+      {offers.data && !offer ? <Text style={Typography.body}>{s.gone}</Text> : null}
 
-      <View style={styles.hero}>
-        <View style={styles.illustration}>
-          <MaterialCommunityIcons name="pipe-leak" size={64} color={Colors.primary} />
-        </View>
-        <View style={styles.heroText}>
-          <Text style={Typography.title}>{mockIncoming.title}</Text>
-          <View style={styles.zonePill}>
-            <Ionicons name="location" size={14} color={Colors.text} />
-            <Text style={styles.zoneText}>
-              {mockIncoming.district} · {s.nearby}
+      {offer ? (
+        <>
+          <View style={[styles.timer, !open && styles.timerExpired]}>
+            <Ionicons name="time-outline" size={22} color={open ? Colors.text : Colors.danger} />
+            <Text style={[styles.timerText, !open && styles.timerTextExpired]}>
+              {open ? interpolate(s.respondIn, { time: formatCountdown(remaining) }) : s.expired}
             </Text>
           </View>
-        </View>
-      </View>
 
-      <View>
-        <FakeMap variant="search" style={styles.map} />
-        <Text style={[Typography.small, styles.mapNote]}>{s.approximate}</Text>
-      </View>
+          <View style={styles.hero}>
+            <View style={styles.illustration}>
+              <MaterialCommunityIcons name={serviceIcon(offer.request.serviceCode, offer.request.categoryCode)} size={64} color={Colors.primary} />
+            </View>
+            <View style={styles.heroText}>
+              <Text style={Typography.title}>{offer.request.serviceName}</Text>
+              <View style={styles.zonePill}>
+                <Ionicons name="location" size={14} color={Colors.text} />
+                <Text style={styles.zoneText}>
+                  {offer.request.areaName ?? s.nearby}
+                  {offer.request.approximateDistanceKm !== null
+                    ? ` · ${interpolate(s.distance, { km: String(offer.request.approximateDistanceKm).replace('.', ',') })}`
+                    : ''}
+                </Text>
+              </View>
+              {offer.request.urgency === 'asap' ? <Text style={styles.urgent}>{t.newRequest.asap}</Text> : null}
+            </View>
+          </View>
 
-      <Card>
-        <View style={styles.labelRow}>
-          <MaterialCommunityIcons name="text-box-outline" size={18} color={Colors.textSecondary} />
-          <Text style={Typography.caption}>{s.need}</Text>
-        </View>
-        <Text style={[Typography.body, styles.description]}>{mockIncoming.description}</Text>
-      </Card>
+          <View>
+            <FakeMap variant="search" style={styles.map} />
+            <Text style={[Typography.small, styles.mapNote]}>{s.approximate}</Text>
+          </View>
 
-      <Card>
-        <View style={styles.row}>
-          <MaterialCommunityIcons name="truck-outline" size={22} color={Colors.text} />
-          <Text style={[styles.feeLabel, styles.grow]}>{s.travelFee}</Text>
-          {editingFee ? (
-            <TextInput
-              value={feeInput}
-              onChangeText={setFeeInput}
-              onBlur={commitFee}
-              onSubmitEditing={commitFee}
-              keyboardType="decimal-pad"
-              autoFocus
-              style={styles.feeInput}
-              accessibilityLabel={s.editFee}
-            />
-          ) : (
-            <Text style={Typography.bodyStrong}>{formatTND(travelFee)}</Text>
-          )}
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={s.editFee}
-            hitSlop={8}
-            onPress={() => (editingFee ? commitFee() : setEditingFee(true))}>
-            <Ionicons name={editingFee ? 'checkmark' : 'pencil'} size={18} color={Colors.text} />
-          </Pressable>
-        </View>
-      </Card>
+          <Card>
+            <View style={styles.labelRow}>
+              <MaterialCommunityIcons name="text-box-outline" size={18} color={Colors.textSecondary} />
+              <Text style={Typography.caption}>{s.need}</Text>
+            </View>
+            <Text style={[Typography.body, styles.description]}>{offer.request.description}</Text>
+          </Card>
 
-      <View style={styles.note}>
-        <MaterialCommunityIcons name="file-document-outline" size={20} color={Colors.textSecondary} />
-        <Text style={[Typography.caption, styles.grow]}>{s.worksAfterDiagnosis}</Text>
-        <Ionicons name="information-circle-outline" size={20} color={Colors.textSecondary} />
-      </View>
+          <Card>
+            <View style={styles.row}>
+              <MaterialCommunityIcons name="truck-outline" size={22} color={Colors.text} />
+              <Text style={[styles.feeLabel, styles.grow]}>{s.travelFee}</Text>
+              {editingFee ? (
+                <TextInput
+                  value={feeInput}
+                  onChangeText={setFeeInput}
+                  onBlur={commitFee}
+                  onSubmitEditing={commitFee}
+                  keyboardType="decimal-pad"
+                  autoFocus
+                  style={styles.feeInput}
+                  accessibilityLabel={s.editFee}
+                />
+              ) : (
+                <Text style={Typography.bodyStrong}>{formatMillimes(travelFee)}</Text>
+              )}
+              {open ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={s.editFee}
+                  hitSlop={8}
+                  onPress={() => (editingFee ? commitFee() : startEditing())}>
+                  <Ionicons name={editingFee ? 'checkmark' : 'pencil'} size={18} color={Colors.text} />
+                </Pressable>
+              ) : null}
+            </View>
+            <Text style={[Typography.small, styles.feeHint]}>{s.feeHint}</Text>
+          </Card>
+
+          <View style={styles.note}>
+            <MaterialCommunityIcons name="file-document-outline" size={20} color={Colors.textSecondary} />
+            <Text style={[Typography.caption, styles.grow]}>{s.worksAfterDiagnosis}</Text>
+          </View>
+        </>
+      ) : null}
     </Screen>
   );
 }
@@ -163,6 +210,7 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   zoneText: { fontSize: 13, color: Colors.text },
+  urgent: { fontSize: 13, fontWeight: '700', color: Colors.danger },
   map: { height: 150, borderRadius: Radius.lg },
   mapNote: { marginTop: Spacing.xs },
   labelRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
@@ -170,6 +218,7 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm + 2 },
   grow: { flex: 1 },
   feeLabel: { fontSize: 15, fontWeight: '600', color: Colors.text },
+  feeHint: { marginTop: Spacing.xs },
   feeInput: {
     minWidth: 80,
     borderWidth: 1,

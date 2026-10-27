@@ -5,6 +5,7 @@ namespace App\ApiResource\Intervention;
 use App\Domain\GeoPoint;
 use App\Entity\Commission;
 use App\Entity\Intervention;
+use App\Entity\Payment;
 use App\Entity\Quote;
 use App\Entity\Review;
 use App\Entity\User;
@@ -16,6 +17,7 @@ use App\Enum\UserRole;
  * - l'adresse exacte n'est révélée au professionnel assigné qu'après confirmation par le client, et seulement tant
  *   que l'intervention est en cours (§6.4) ; le client propriétaire et l'administration la voient toujours ;
  * - la commission n'est visible que du professionnel et de l'administration (§6.7) ;
+ * - le paiement en espèces (déclaré à la clôture, puis confirmé par le professionnel) est visible de tous ;
  * - les heures sont en UTC ; estimatedArrivalAt est une estimation et doit être affichée comme telle (§5.6).
  */
 final class InterventionView
@@ -28,6 +30,7 @@ final class InterventionView
      * @param array<string, mixed>|null                                                                                                                            $acceptedQuote
      * @param array<string, mixed>|null                                                                                                                            $pendingQuote
      * @param array{baseMillimes: int, rateBasisPoints: int, amountMillimes: int, currency: string, status: string}|null                                           $commission
+     * @param array{method: string, status: string, amountMillimes: int, currency: string}|null                                                                 $payment
      * @param array{rating: int, comment: string|null, createdAt: \DateTimeImmutable}|null                                                                         $review
      */
     public function __construct(
@@ -47,11 +50,12 @@ final class InterventionView
         public readonly ?array $acceptedQuote,
         public readonly ?array $pendingQuote,
         public readonly ?array $commission,
+        public readonly ?array $payment,
         public readonly ?array $review,
     ) {
     }
 
-    public static function for(Intervention $intervention, User $viewer, ?Commission $commission, ?Review $review): self
+    public static function for(Intervention $intervention, User $viewer, ?Commission $commission, ?Payment $payment, ?Review $review): self
     {
         $request = $intervention->getRequest();
         $professional = $intervention->getProfessional();
@@ -106,6 +110,12 @@ final class InterventionView
                 'currency' => $commission->getCurrency(),
                 'status' => $commission->getStatus()->value,
             ] : null,
+            null === $payment ? null : [
+                'method' => $payment->getMethod()->value,
+                'status' => $payment->getStatus()->value,
+                'amountMillimes' => $payment->getGrossMillimes(),
+                'currency' => $payment->getCurrency(),
+            ],
             null === $review ? null : [
                 'rating' => $review->getRating(),
                 'comment' => $review->getComment(),

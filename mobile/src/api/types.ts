@@ -153,6 +153,13 @@ export type Intervention = {
     currency: string;
     status: 'due' | 'paid' | 'adjusted' | 'cancelled';
   } | null;
+  /** Paiement en espèces déclaré à la clôture, puis confirmé par le professionnel. */
+  payment: {
+    method: 'cash_direct' | 'provider';
+    status: 'declared' | 'confirmed' | 'refunded';
+    amountMillimes: number;
+    currency: string;
+  } | null;
   review: { rating: number; comment: string | null; createdAt: string } | null;
 };
 

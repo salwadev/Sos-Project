@@ -29,6 +29,7 @@ final class SeedCatalogCommand extends Command
             'glazing' => ['Vitrerie', 'بلّور', false],
             'air_conditioning' => ['Climatisation', 'تكييف', false],
             'appliances' => ['Équipements domestiques', 'أجهزة منزلية', false],
+            'housekeeping' => ['Ménage à domicile', 'تنظيف المنزل', false],
         ]],
         'car' => ['Automobile', 'السيارة', false, [
             'battery' => ['Batterie', 'بطارية', false],

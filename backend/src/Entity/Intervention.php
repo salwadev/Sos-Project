@@ -16,6 +16,7 @@ use App\Enum\InterventionStatus;
 use App\Enum\QuoteStatus;
 use App\Enum\UserRole;
 use App\Security\Voter\InterventionVoter;
+use App\State\Intervention\ConfirmCashPaymentProcessor;
 use App\State\Intervention\ConfirmCompletionProcessor;
 use App\State\Intervention\CreateReviewProcessor;
 use App\State\Intervention\DisputeInterventionProcessor;
@@ -34,7 +35,8 @@ use Symfony\Component\Uid\Uuid;
  * Porte les étapes d'exécution (§6.6), les versions de devis, les paiements et la commission.
  *
  * API (§14.3, §14.4) : le professionnel assigné déclare les étapes et propose les devis ; le client propriétaire
- * de la demande accepte ou refuse les devis (/api/quotes/{id}/…), confirme la fin, conteste et laisse un avis.
+ * de la demande accepte ou refuse les devis (/api/quotes/{id}/…), confirme la fin, conteste et laisse un avis ;
+ * le professionnel confirme ensuite avoir reçu le paiement en espèces.
  * Toutes les réponses sont des InterventionView adaptées à celui qui consulte.
  */
 #[ORM\Entity]
@@ -81,6 +83,15 @@ use Symfony\Component\Uid\Uuid;
             deserialize: false,
             output: InterventionView::class,
             processor: ConfirmCompletionProcessor::class,
+        ),
+        new Post(
+            uriTemplate: '/interventions/{id}/payment/confirm-cash',
+            status: 200,
+            throwOnNotFound: true,
+            security: "is_granted('".InterventionVoter::WORK."', object)",
+            deserialize: false,
+            output: InterventionView::class,
+            processor: ConfirmCashPaymentProcessor::class,
         ),
         new Post(
             uriTemplate: '/interventions/{id}/dispute',

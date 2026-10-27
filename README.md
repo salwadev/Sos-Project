@@ -272,7 +272,8 @@ l'administration, et le support sauf demandes santé.
 | `POST /api/interventions/{id}/status` `{status, estimatedArrivalMinutes?}` | Professionnel assigné : `on_the_way` → `on_site` → `working` → `completion_declared`, uniquement vers l'avant (les deux premières étapes peuvent être omises). `estimatedArrivalMinutes` seulement avec `on_the_way` : `estimatedArrivalAt` est une estimation (§5.6). `working` exige un devis accepté et aucun en attente, et applique `start_work` (ACCEPTED → IN_PROGRESS) ; `completion_declared` n'est possible qu'après `working`, sans devis en attente. |
 | `POST /api/interventions/{id}/quotes` `{lines: [{label, amountMillimes}], explanation?}` | Professionnel assigné, jusqu'à `working` inclus : nouvelle version (201). `explanation` obligatoire dès la version 2 (§6.6) ; une version encore en attente est marquée `superseded`. |
 | `POST /api/quotes/{id}/accept`, `POST /api/quotes/{id}/reject` | Client propriétaire seulement : aucune modification de prix n'est acceptée sans cette action (§16.4). Après un refus, la dernière version acceptée reste celle qui fait foi ; toutes les versions sont conservées avec `proposedAt`/`decidedAt`. |
-| `POST /api/interventions/{id}/confirm-completion` | Client propriétaire, après `completion_declared` : `complete` (IN_PROGRESS → COMPLETED) et calcul de la `Commission`, **une seule fois** (vérification sous verrou + contrainte unique ; une seconde confirmation renvoie 409). |
+| `POST /api/interventions/{id}/confirm-completion` | Client propriétaire, après `completion_declared` : `complete` (IN_PROGRESS → COMPLETED) et calcul de la `Commission`, **une seule fois** (vérification sous verrou + contrainte unique ; une seconde confirmation renvoie 409). Un `Payment` en espèces (`cash_direct`, `declared`) est enregistré pour le total du devis accepté. |
+| `POST /api/interventions/{id}/payment/confirm-cash` | Professionnel assigné, après la clôture : confirme avoir reçu les espèces (`declared` → `confirmed`), une seule fois (409 sinon), journalisé `payment.cash_confirmed`. Le paiement est visible dans `payment` de l'intervention, pour le client comme pour le pro. |
 | `POST /api/interventions/{id}/dispute` `{reason}` | Client propriétaire, pendant les travaux ou après la clôture : `dispute` (→ DISPUTED). Trace horodatée : transition avec motif dans `service_request_transition` et `Complaint` ouverte pour le support (§5.7, §7.4). L'intervention est alors gelée ; une commission déjà calculée est conservée en attendant la résolution. |
 | `POST /api/interventions/{id}/reviews` `{rating 1–5, comment?}` | Client propriétaire, intervention terminée et confirmée (demande `COMPLETED`, sans contestation) ; un seul avis par intervention (201, puis 409). Met à jour la note moyenne du professionnel. |
 
@@ -369,3 +370,77 @@ demandes, catégories, réclamations), stockage objet privé à liens signés et
 `expired` avec relance du professionnel. Côté intervention : notifications des changements
 d'étape et de devis, résolution des contestations par le support (`resolve_dispute`, ajustement de commission) et délai
 de contestation (§9.5), canal de contact contrôlé (§5.6), annulation par le professionnel après confirmation.
+
+## Mobile
+
+App Expo (SDK 58, Expo Router) dans `mobile/` : parcours client et professionnel branchés sur l'API, en français et
+en arabe (RTL). Code d'accès à l'API : `src/api/client.ts` (fetch, renouvellement du jeton, `ApiError`),
+`src/api/endpoints.ts`, `src/api/types.ts` ; session : `src/auth/auth-context.tsx`.
+
+### Lancer l'app contre l'API locale
+
+Prérequis : base, API et worker démarrés, comptes de démo créés (voir [Tester à la main](#tester-à-la-main), étapes 1 et 2).
+
+```bash
+cd mobile
+npm install
+```
+
+L'URL de l'API (préfixe `/api` compris) vient de `EXPO_PUBLIC_API_URL`, à mettre dans `mobile/.env.local`
+(modèle : `mobile/.env.example`). Elle est lue au moment du bundle : relancer avec `npx expo start -c` après un changement.
+
+| Cible | `EXPO_PUBLIC_API_URL` |
+|---|---|
+| Émulateur Android | `http://10.0.2.2:8000/api` — valeur par défaut sur Android sans `.env.local` (10.0.2.2 = la machine hôte) |
+| Simulateur iOS, web | `http://localhost:8000/api` — valeur par défaut ailleurs |
+| Téléphone physique (Expo Go) | `http://<IP du PC sur le réseau local>:8000/api`, et l'API lancée avec `--listen-ip=0.0.0.0` |
+
+```bash
+npx expo start
+```
+
+Puis `a` (émulateur Android), `i` (simulateur iOS) ou `w` (navigateur).
+
+**Se connecter** : saisir les 8 chiffres sans `+216` (client `50000002`, professionnels `50000011` à `50000013`), puis
+le code écrit dans `backend/var/sms_outbox.log` (en développement, l'écran du code le rappelle). Le lien « Vous êtes
+professionnel ? » sous le formulaire ouvre l'espace pro ; on bascule ensuite d'un espace à l'autre depuis l'onglet Profil.
+Un compte sans profil professionnel arrive sur l'écran d'inscription (`POST /api/professional/profile`).
+
+### Une demande de bout en bout
+
+Avec deux appareils (ou un émulateur et le navigateur, voir la limite CORS plus bas) :
+
+1. **Client** : Accueil › Maison › Plomberie, description, quartier « La Marsa » et adresse › « Rechercher un professionnel ».
+2. Le worker diffuse la demande (≤ 10 s). **Pro** (`50000011`) : la carte « Nouvelle demande à proximité » apparaît sur
+   l'accueil › « Proposer et réserver » (frais de déplacement modifiables à la baisse).
+3. **Client** : l'écran de recherche affiche la proposition › cocher les frais › « Confirmer ce professionnel ».
+4. **Pro** : Missions › la mission › « Je pars » (durée estimée), « Je suis sur place », saisie du devis ligne par ligne.
+5. **Client** : Suivi › « Voir le devis » › accepter (ou demander une modification : le pro envoie une version 2, avec explication).
+6. **Pro** : « Commencer les travaux » puis « Déclarer les travaux terminés ».
+7. **Client** : « Confirmer la fin des travaux » (ou « Signaler un problème ») puis l'avis. **Pro** : la commission apparaît
+   dans Relevés.
+
+### Comportement
+
+- **Session** : jeton d'accès (15 min) et jeton de rafraîchissement dans `expo-secure-store` (en mémoire sur le web).
+  Au premier 401, un seul `POST /api/auth/refresh` est lancé (rotation) puis la requête est rejouée ; s'il échoue, retour
+  à l'écran de connexion. « Se déconnecter » révoque le jeton de rafraîchissement (`/api/auth/logout`).
+- **Mises à jour** : en attendant les notifications push, les écrans de suivi (recherche, proposition, intervention,
+  sollicitations, missions) relisent l'API toutes les 5 s tant qu'ils sont affichés et que l'app est au premier plan
+  (`POLL_INTERVAL_MS` dans `src/constants/config.ts`).
+- **Conflits** : un 409 affiche le `detail` du serveur dans un encadré « Action impossible » (demande déjà réservée par
+  un autre professionnel, réservation expirée, devis plus en attente…) et l'écran se recharge pour montrer l'état réel.
+  Les erreurs de saisie (422) affichent les messages de validation.
+- **Idempotence** : `POST /api/requests` envoie un `Idempotency-Key` fixé à l'ouverture du formulaire : renvoyer après
+  une coupure réseau ne crée pas de doublon.
+
+### Limites connues
+
+- Pas de géolocalisation ni de vraie carte (`expo-location`, carte : non installés) : le client choisit un quartier
+  (`src/constants/places.ts`) dont les coordonnées sont envoyées ; la carte reste une illustration SVG.
+- Dépôt des justificatifs (`POST /api/professional/documents`) : depuis la version web seulement ; sur téléphone il
+  faudra `expo-document-picker`.
+- Version web : le backend n'autorise pas l'en-tête `Idempotency-Key` en CORS (`allow_headers` de
+  `backend/config/packages/nelmio_cors.yaml`), donc la création de demande échoue dans le navigateur. Les apps natives
+  ne sont pas concernées.
+- Ni push, ni canal de contact avec le professionnel (§5.6), ni photos jointes à la demande (pas d'endpoint).
